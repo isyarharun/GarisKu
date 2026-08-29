@@ -36,26 +36,31 @@ private val LineColor = GreenPrimary         // #65C32F (hijau garis)
 private val TargetRing = OrangeSecondary     // #F57C00 (oranye pulsing)
 private val WinOverlay = GreenSuccess.copy(alpha = 0.55f) // #4CAF50
 
-private val TestNumberPositions = mapOf(
-    1 to Position(0, 0),
-    2 to Position(0, 3),
-    3 to Position(4, 3),
-    4 to Position(4, 0),
-    5 to Position(1, 0),
-)
-
-/** Challenge level: serpentine path covering all 25 cells, numbers spread along it. */
-private val ChallengeNumberPositions = mapOf(
-    1 to Position(0, 0),
-    2 to Position(0, 3),
-    3 to Position(1, 3),
-    4 to Position(1, 0),
-    5 to Position(2, 2),
-    6 to Position(3, 4),
-    7 to Position(3, 1),
-    8 to Position(4, 1),
-    9 to Position(4, 4),
-)
+private fun buildLevel(mode: GameMode, levelNumber: Int): GameState {
+    val random = kotlin.random.Random.Default
+    // Difficulty scaling: grid grows every 5 levels, capped at 10x10.
+    val gridSize = (4 + (levelNumber - 1) / 5).coerceIn(4, 10)
+    val cells = gridSize * gridSize
+    return when (mode) {
+        GameMode.SIMPLE -> {
+            // Numbers keep growing with level (+1 every 2 levels), capped at half the cells.
+            val numbers = (gridSize + kotlin.random.Random.nextInt(0, 2) + (levelNumber - 1) / 2)
+                .coerceIn(4, cells / 2)
+            val positions = LevelGenerator.generateSimplePath(gridSize, gridSize, numbers, random)
+            GameState(rows = gridSize, cols = gridSize, numberPositions = positions, totalNumbers = numbers, mode = mode)
+        }
+        GameMode.CHALLENGE -> {
+            // Numbers grow (+1 every 3 levels), capped at a third of the cells
+            // so segments never get trivially short.
+            val numbers = (gridSize + gridSize / 2 + (levelNumber - 1) / 3)
+                .coerceIn(minOf(6, cells / 3), cells / 3)
+            val positions = LevelGenerator.placeNumbers(
+                LevelGenerator.generateHamiltonianPath(gridSize, gridSize, random), numbers, random
+            )
+            GameState(rows = gridSize, cols = gridSize, numberPositions = positions, totalNumbers = numbers, mode = mode)
+        }
+    }
+}
 
 private fun formatTime(seconds: Int): String {
     val m = seconds / 60
@@ -66,23 +71,11 @@ private fun formatTime(seconds: Int): String {
 @Composable
 fun GarisKuGame(modifier: Modifier = Modifier) {
     var mode by remember { mutableStateOf(GameMode.SIMPLE) }
+    var levelNumber by remember { mutableStateOf(1) }
 
-    // (Re)create the game state when mode changes.
-    val gameState = remember(mode) {
-        when (mode) {
-            GameMode.SIMPLE -> GameState(
-                rows = 5, cols = 5,
-                numberPositions = TestNumberPositions,
-                totalNumbers = 5,
-                mode = mode
-            )
-            GameMode.CHALLENGE -> GameState(
-                rows = 5, cols = 5,
-                numberPositions = ChallengeNumberPositions,
-                totalNumbers = 9,
-                mode = mode
-            )
-        }
+    // (Re)create the game state when mode or level changes → fresh generated level.
+    val gameState = remember(mode, levelNumber) {
+        buildLevel(mode, levelNumber)
     }
 
     // Error auto-clear
@@ -117,9 +110,21 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
 
         // ── Mode selector ────────────────────────────────
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            ModeButton("Simple", mode == GameMode.SIMPLE) { mode = GameMode.SIMPLE }
-            ModeButton("Challenge", mode == GameMode.CHALLENGE) { mode = GameMode.CHALLENGE }
+            ModeButton("Simple", mode == GameMode.SIMPLE) {
+                mode = GameMode.SIMPLE; levelNumber = 1
+            }
+            ModeButton("Challenge", mode == GameMode.CHALLENGE) {
+                mode = GameMode.CHALLENGE; levelNumber = 1
+            }
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // ── Level ─────────────────────────────────────────
+        Text(
+            text = "Level ${levelNumber}  |  ${gameState.rows}×${gameState.rows}  ${gameState.totalNumbers} nomor",
+            color = CellNumbered, fontSize = 16.sp, fontWeight = FontWeight.Bold
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -152,11 +157,17 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // ── Reset ────────────────────────────────────────
-        Button(
-            onClick = { gameState.reset() },
-            colors = ButtonDefaults.buttonColors(containerColor = CellNumbered)
-        ) { Text("🔄 Main Lagi", color = Color.White, fontSize = 16.sp) }
+        // ── Reset / Level Baru ──────────────────────────
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(
+                onClick = { gameState.reset() },
+                colors = ButtonDefaults.buttonColors(containerColor = CellEmpty)
+            ) { Text("🔄 Ulang", color = Color.White, fontSize = 15.sp) }
+            Button(
+                onClick = { levelNumber++ },
+                colors = ButtonDefaults.buttonColors(containerColor = CellNumbered)
+            ) { Text("🎲 Level Baru", color = Color.White, fontSize = 15.sp) }
+        }
     }
 }
 
@@ -314,6 +325,8 @@ private fun GameGrid(
 
         // ── 3. Lines ──────────────────────────────────────
         val path = gameState.path
+        // Line width scales down relative to cell size on big grids.
+        val lineWidth = (cellSizePx * 0.16f).coerceIn(5f, 12f)
         if (path.size >= 2) {
             for (i in 0 until path.size - 1) {
                 val from = path[i]
@@ -326,12 +339,12 @@ private fun GameGrid(
                         from.row * cellSizePx + cellSizePx / 2),
                     Offset(to.col * cellSizePx + cellSizePx / 2,
                         to.row * cellSizePx + cellSizePx / 2),
-                    12f, StrokeCap.Round)
+                    lineWidth, StrokeCap.Round)
             }
 
             for (pos in path) {
                 if (gameState.isNumbered(pos)) {
-                    drawCircle(LineColor, 6f,
+                    drawCircle(LineColor, (cellSizePx * 0.08f).coerceIn(3f, 6f),
                         Offset(pos.col * cellSizePx + cellSizePx / 2,
                             pos.row * cellSizePx + cellSizePx / 2))
                 }
@@ -350,7 +363,15 @@ private fun GameGrid(
         }
 
         // ── 5. Numbers ────────────────────────────────────
-        val textStyle = TextStyle(color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        // Font scales down on big grids so numbers stay readable without overflow.
+        val numberFont = when {
+            cols >= 10 -> 13.sp
+            cols >= 9 -> 15.sp
+            cols >= 8 -> 17.sp
+            cols >= 6 -> 20.sp
+            else -> 24.sp
+        }
+        val textStyle = TextStyle(color = Color.White, fontSize = numberFont, fontWeight = FontWeight.Bold)
 
         for (r in 0 until rows) {
             for (c in 0 until cols) {
