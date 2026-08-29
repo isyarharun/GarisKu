@@ -5,6 +5,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlin.math.abs
 
+/** Game mode. */
+enum class GameMode { SIMPLE, CHALLENGE }
+
 data class Position(val row: Int, val col: Int) {
     fun isAdjacentTo(other: Position): Boolean {
         val dr = abs(row - other.row)
@@ -20,12 +23,17 @@ data class Cell(
 
 /**
  * Game state with full trail dragging, undo, and a simple timer.
+ *
+ * Modes:
+ * - SIMPLE: win when all numbers connected in order.
+ * - CHALLENGE: win when all numbers connected in order AND every cell is filled.
  */
 class GameState(
     val rows: Int,
     val cols: Int,
     val numberPositions: Map<Int, Position>,
-    val totalNumbers: Int
+    val totalNumbers: Int,
+    val mode: GameMode = GameMode.SIMPLE
 ) {
     var grid by mutableStateOf(createEmptyGrid())
         private set
@@ -49,6 +57,9 @@ class GameState(
     val connectedNumbers: Int get() = path.count { grid[it.row][it.col].number != null }
 
     val nextNumber: Int get() = connectedNumbers + 1
+
+    /** How many total cells must be filled to win in challenge mode. */
+    val totalCells: Int get() = rows * cols
 
     fun isNumbered(pos: Position): Boolean = grid[pos.row][pos.col].number != null
 
@@ -131,7 +142,14 @@ class GameState(
     }
 
     private fun checkCompletion() {
-        if (connectedNumbers == totalNumbers) {
+        if (connectedNumbers != totalNumbers) return
+
+        if (mode == GameMode.CHALLENGE) {
+            // Challenge: also require every cell filled.
+            if (path.size == totalCells) {
+                isComplete = true
+            }
+        } else {
             isComplete = true
         }
     }

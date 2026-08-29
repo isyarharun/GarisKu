@@ -44,6 +44,19 @@ private val TestNumberPositions = mapOf(
     5 to Position(1, 0),
 )
 
+/** Challenge level: serpentine path covering all 25 cells, numbers spread along it. */
+private val ChallengeNumberPositions = mapOf(
+    1 to Position(0, 0),
+    2 to Position(0, 3),
+    3 to Position(1, 3),
+    4 to Position(1, 0),
+    5 to Position(2, 2),
+    6 to Position(3, 4),
+    7 to Position(3, 1),
+    8 to Position(4, 1),
+    9 to Position(4, 4),
+)
+
 private fun formatTime(seconds: Int): String {
     val m = seconds / 60
     val s = seconds % 60
@@ -52,12 +65,24 @@ private fun formatTime(seconds: Int): String {
 
 @Composable
 fun GarisKuGame(modifier: Modifier = Modifier) {
-    val gameState = remember {
-        GameState(
-            rows = 5, cols = 5,
-            numberPositions = TestNumberPositions,
-            totalNumbers = 5
-        )
+    var mode by remember { mutableStateOf(GameMode.SIMPLE) }
+
+    // (Re)create the game state when mode changes.
+    val gameState = remember(mode) {
+        when (mode) {
+            GameMode.SIMPLE -> GameState(
+                rows = 5, cols = 5,
+                numberPositions = TestNumberPositions,
+                totalNumbers = 5,
+                mode = mode
+            )
+            GameMode.CHALLENGE -> GameState(
+                rows = 5, cols = 5,
+                numberPositions = ChallengeNumberPositions,
+                totalNumbers = 9,
+                mode = mode
+            )
+        }
     }
 
     // Error auto-clear
@@ -90,12 +115,32 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // ── Mode selector ────────────────────────────────
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            ModeButton("Simple", mode == GameMode.SIMPLE) { mode = GameMode.SIMPLE }
+            ModeButton("Challenge", mode == GameMode.CHALLENGE) { mode = GameMode.CHALLENGE }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // ── Hint ─────────────────────────────────────────
+        Text(
+            text = if (mode == GameMode.CHALLENGE)
+                "Penuhi semua sel + hubungkan berurutan"
+            else "Hubungkan nomor berurutan",
+            color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         // ── Timer ────────────────────────────────────────
         if (gameState.isComplete) {
             Text("✨ Selesai! ✨", color = TargetRing, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(4.dp))
         }
-        Text("⏱ ${formatTime(gameState.elapsedSeconds)}",
+        Text("⏱ ${formatTime(gameState.elapsedSeconds)}${
+            if (mode == GameMode.CHALLENGE) "  |  ${gameState.path.size}/${gameState.totalCells} sel" else ""
+        }",
             color = Color.White.copy(alpha = if (gameState.timerStarted) 1f else 0.5f),
             fontSize = if (gameState.isComplete) 24.sp else 16.sp)
 
@@ -112,6 +157,20 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
             onClick = { gameState.reset() },
             colors = ButtonDefaults.buttonColors(containerColor = CellNumbered)
         ) { Text("🔄 Main Lagi", color = Color.White, fontSize = 16.sp) }
+    }
+}
+
+@Composable
+private fun ModeButton(label: String, selected: Boolean, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (selected) TargetRing else CellEmpty,
+            contentColor = Color.White
+        ),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
+    ) {
+        Text(label, fontSize = 15.sp, fontWeight = FontWeight.Bold)
     }
 }
 
