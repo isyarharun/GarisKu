@@ -27,14 +27,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
-// ── Color Palette ──────────────────────────────────────────
-private val NavyBg = Color(0xFF1B1B2F)
-private val NavyLighter = Color(0xFF162447)
-private val BlueCard = Color(0xFF1F4068)
-private val RoseVisited = Color(0xFFE43F5A)
-private val CyanLine = Color(0xFF00D2FF)
-private val GoldGlow = Color(0xFFFFD700)
-private val White = Color.White
+// ── Color Palette (KaloriKu theme) ────────────────────────
+private val GridBg = BackgroundDark          // #121212
+private val CellEmpty = SurfaceVariantDark   // #2C2C2C
+private val CellNumbered = GreenPrimaryDarkTheme // #7ED957 (hijau terang)
+private val CellVisited = OrangeSecondaryDark    // #FFB74D (oranye hangat)
+private val LineColor = GreenPrimary         // #65C32F (hijau garis)
+private val TargetRing = OrangeSecondary     // #F57C00 (oranye pulsing)
+private val WinOverlay = GreenSuccess.copy(alpha = 0.55f) // #4CAF50
 
 private val TestNumberPositions = mapOf(
     1 to Position(0, 0),
@@ -86,17 +86,17 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.Center
     ) {
         // ── Title ────────────────────────────────────────
-        Text("GarisKu", color = White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text("GarisKu", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
 
         Spacer(modifier = Modifier.height(8.dp))
 
         // ── Timer ────────────────────────────────────────
         if (gameState.isComplete) {
-            Text("✨ Selesai! ✨", color = GoldGlow, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("✨ Selesai! ✨", color = TargetRing, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(4.dp))
         }
         Text("⏱ ${formatTime(gameState.elapsedSeconds)}",
-            color = White.copy(alpha = if (gameState.timerStarted) 1f else 0.4f),
+            color = Color.White.copy(alpha = if (gameState.timerStarted) 1f else 0.5f),
             fontSize = if (gameState.isComplete) 24.sp else 16.sp)
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -110,8 +110,8 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
         // ── Reset ────────────────────────────────────────
         Button(
             onClick = { gameState.reset() },
-            colors = ButtonDefaults.buttonColors(containerColor = BlueCard)
-        ) { Text("🔄 Main Lagi", color = White, fontSize = 16.sp) }
+            colors = ButtonDefaults.buttonColors(containerColor = CellNumbered)
+        ) { Text("🔄 Main Lagi", color = Color.White, fontSize = 16.sp) }
     }
 }
 
@@ -218,7 +218,7 @@ private fun GameGrid(
         val pad = 4f
 
         // ── 1. Grid BG ────────────────────────────────────
-        drawRoundRect(NavyBg, Offset.Zero, Size(w, h), CornerRadius(24f))
+        drawRoundRect(GridBg, Offset.Zero, Size(w, h), CornerRadius(24f))
 
         // ── 2. Cells ──────────────────────────────────────
         for (r in 0 until rows) {
@@ -228,9 +228,9 @@ private fun GameGrid(
                 val cy = r * cellSizePx
 
                 val cellColor = when {
-                    cell.isVisited -> RoseVisited
-                    cell.number != null -> BlueCard
-                    else -> NavyLighter
+                    cell.isVisited -> CellVisited
+                    cell.number != null -> CellNumbered
+                    else -> CellEmpty
                 }
 
                 val shakeX = if (gameState.hasError && cell.number == gameState.nextNumber)
@@ -244,7 +244,7 @@ private fun GameGrid(
                     val ringPad = pad + (cellSizePx - pad * 2) * (1f - pulseScale) / 2f
                     val ringSize = (cellSizePx - pad * 2) * pulseScale
                     drawRoundRect(
-                        GoldGlow.copy(alpha = pulseAlpha),
+                        TargetRing.copy(alpha = pulseAlpha),
                         Offset(cx + ringPad + shakeX, cy + ringPad),
                         Size(ringSize, ringSize), CornerRadius(12f),
                         style = Stroke(width = 3f)
@@ -262,7 +262,7 @@ private fun GameGrid(
                 val alpha = if (i == path.size - 2)
                     0.3f + 0.7f * drawProgress.value else 1f
 
-                drawLine(CyanLine.copy(alpha = alpha),
+                drawLine(LineColor.copy(alpha = alpha),
                     Offset(from.col * cellSizePx + cellSizePx / 2,
                         from.row * cellSizePx + cellSizePx / 2),
                     Offset(to.col * cellSizePx + cellSizePx / 2,
@@ -272,7 +272,7 @@ private fun GameGrid(
 
             for (pos in path) {
                 if (gameState.isNumbered(pos)) {
-                    drawCircle(CyanLine, 6f,
+                    drawCircle(LineColor, 6f,
                         Offset(pos.col * cellSizePx + cellSizePx / 2,
                             pos.row * cellSizePx + cellSizePx / 2))
                 }
@@ -285,13 +285,13 @@ private fun GameGrid(
             val lx = last.col * cellSizePx + cellSizePx / 2
             val ly = last.row * cellSizePx + cellSizePx / 2
 
-            drawLine(CyanLine.copy(alpha = 0.4f),
+            drawLine(LineColor.copy(alpha = 0.4f),
                 Offset(lx, ly), dragPos!!, 12f, StrokeCap.Round)
-            drawCircle(CyanLine.copy(alpha = 0.25f), 18f, dragPos!!)
+            drawCircle(LineColor.copy(alpha = 0.25f), 18f, dragPos!!)
         }
 
         // ── 5. Numbers ────────────────────────────────────
-        val textStyle = TextStyle(color = White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        val textStyle = TextStyle(color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
 
         for (r in 0 until rows) {
             for (c in 0 until cols) {
@@ -305,14 +305,14 @@ private fun GameGrid(
                 drawText(textLayoutResult = result,
                     topLeft = Offset(cx - result.size.width / 2f,
                         cy - result.size.height / 2f),
-                    color = if (cell.isVisited) White.copy(0.5f) else White)
+                    color = if (cell.isVisited) Color.White.copy(alpha = 0.5f) else Color.White)
             }
         }
 
         // ── 6. Victory ─────────────────────────────────────
         if (gameState.isComplete) {
             val bgAlpha = victoryProgress.value * 0.55f
-            drawRoundRect(CyanLine.copy(alpha = bgAlpha),
+            drawRoundRect(LineColor.copy(alpha = bgAlpha),
                 Offset.Zero, Size(w, h), CornerRadius(24f))
 
             val emojiScale = victoryProgress.value
@@ -331,7 +331,7 @@ private fun GameGrid(
                 val sx = w / 2 + kotlin.math.cos(angle) * dist
                 val sy = h / 2 + kotlin.math.sin(angle) * dist
                 drawCircle(
-                    GoldGlow.copy(alpha = victoryProgress.value *
+                    TargetRing.copy(alpha = victoryProgress.value *
                         (0.5f + 0.5f * kotlin.math.sin(victoryProgress.value * 10f + i.toFloat()))),
                     4f + 2f * victoryProgress.value, Offset(sx, sy))
             }

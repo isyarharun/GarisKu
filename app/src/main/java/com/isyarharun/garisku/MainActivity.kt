@@ -13,7 +13,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            Surface(modifier = Modifier.fillMaxSize()) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = BackgroundDark
+            ) {
                 GarisKuGame()
             }
         }
