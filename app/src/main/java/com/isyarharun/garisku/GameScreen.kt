@@ -35,6 +35,7 @@ private val CellVisited = OrangeSecondaryDark    // #FFB74D (oranye hangat)
 private val LineColor = GreenPrimary         // #65C32F (hijau garis)
 private val TargetRing = OrangeSecondary     // #F57C00 (oranye pulsing)
 private val WinOverlay = GreenSuccess.copy(alpha = 0.55f) // #4CAF50
+private val BrickColor = Color(0xFF37474F)   // bata abu-abu biru (blocked cell)
 
 private fun buildLevel(mode: GameMode, levelNumber: Int): GameState {
     val random = kotlin.random.Random.Default
@@ -50,14 +51,29 @@ private fun buildLevel(mode: GameMode, levelNumber: Int): GameState {
             GameState(rows = gridSize, cols = gridSize, numberPositions = positions, totalNumbers = numbers, mode = mode)
         }
         GameMode.CHALLENGE -> {
-            // Numbers grow (+1 every 3 levels), capped at a third of the cells
-            // so segments never get trivially short.
-            val numbers = (gridSize + gridSize / 2 + (levelNumber - 1) / 3)
-                .coerceIn(minOf(6, cells / 3), cells / 3)
-            val positions = LevelGenerator.placeNumbers(
-                LevelGenerator.generateHamiltonianPath(gridSize, gridSize, random), numbers, random
+            // Phased difficulty:
+            //  Phase 1 (grid growth): numbers grow with grid so the route lengthens.
+            //  Phase 2 (sparsification, once grid caps at 10x10): numbers DECREASE
+            //    so segments grow long and the player must plan the route.
+            //    More numbers = easier (dense waypoints force the path), so fewer is harder.
+            val maxNumbers = cells / 3
+            val phase1 = gridSize + gridSize / 2 + (levelNumber - 15) / 4
+            val phase2 = 16 - (levelNumber - 15) / 4
+            val numbers = if (gridSize >= 10) {
+                phase2.coerceIn(6, maxNumbers)
+            } else {
+                phase1.coerceIn(minOf(6, maxNumbers), maxNumbers)
+            }
+            // A few random bricks (max 5) that keep the route solvable.
+            val brickMax = 5
+            val brick = LevelGenerator.generateBrickLevel(
+                gridSize, gridSize, numbers, brickMax, random
             )
-            GameState(rows = gridSize, cols = gridSize, numberPositions = positions, totalNumbers = numbers, mode = mode)
+            GameState(
+                rows = gridSize, cols = gridSize,
+                numberPositions = brick.numberPositions, totalNumbers = numbers,
+                mode = mode, blocks = brick.blocks
+            )
         }
     }
 }
@@ -131,7 +147,7 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
         // ── Hint ─────────────────────────────────────────
         Text(
             text = if (mode == GameMode.CHALLENGE)
-                "Penuhi semua sel + hubungkan berurutan"
+                "Lewati semua sel terbuka, hindari bata 🧱"
             else "Hubungkan nomor berurutan",
             color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp
         )
@@ -142,9 +158,11 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
         if (gameState.isComplete) {
             Text("✨ Selesai! ✨", color = TargetRing, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(4.dp))
+        } else if (gameState.isWrongRoute) {
+            Text("❌ Rute salah — penuhi kembali!", color = Color(0xFFFF4444), fontSize = 15.sp, fontWeight = FontWeight.Bold)
         }
         Text("⏱ ${formatTime(gameState.elapsedSeconds)}${
-            if (mode == GameMode.CHALLENGE) "  |  ${gameState.path.size}/${gameState.totalCells} sel" else ""
+            if (mode == GameMode.CHALLENGE) "  |  ${gameState.path.size}/${gameState.openCellCount} sel" else ""
         }",
             color = Color.White.copy(alpha = if (gameState.timerStarted) 1f else 0.5f),
             fontSize = if (gameState.isComplete) 24.sp else 16.sp)
@@ -259,12 +277,21 @@ private fun GameGrid(
 
                             if (newCell != lastDragCell) {
                                 val gPath = gameState.path
-                                // ── UNDO: drag backward to previous cell ──
-                                if (gPath.size >= 2 && newCell == gPath[gPath.size - 2]) {
-                                    gameState.undo()
-                                } else {
-                                    gameState.tryConnect(frow, fcol)
+                                val idxInPath = gPath.indexOf(newCell)
+
+                                if (idxInPath >= 0 && idxInPath < gPath.size - 1) {
+                                    // Retracing an already-visited cell → undo back to it.
+                                    while (gameState.path.size > idxInPath + 1) {
+                                        if (!gameState.undo()) break
+                                    }
+                                } else if (idxInPath < 0) {
+                                    // Forward: only connect if adjacent to the CURRENT tip.
+                                    val tip = gameState.path.lastOrNull()
+                                    if (tip != null && newCell.isAdjacentTo(tip)) {
+                                        gameState.tryConnect(frow, fcol)
+                                    }
                                 }
+                                // If newCell is the current tip, do nothing.
                                 lastDragCell = newCell
                             }
 
@@ -294,10 +321,12 @@ private fun GameGrid(
         for (r in 0 until rows) {
             for (c in 0 until cols) {
                 val cell = gameState.grid[r][c]
+                val pos = Position(r, c)
                 val cx = c * cellSizePx
                 val cy = r * cellSizePx
 
                 val cellColor = when {
+                    gameState.isBlocked(pos) -> BrickColor
                     cell.isVisited -> CellVisited
                     cell.number != null -> CellNumbered
                     else -> CellEmpty
@@ -308,6 +337,18 @@ private fun GameGrid(
 
                 drawRoundRect(cellColor, Offset(cx + pad + shakeX, cy + pad),
                     Size(cellSizePx - pad * 2, cellSizePx - pad * 2), CornerRadius(12f))
+
+                // Brick texture: small inner mark so walls read clearly.
+                if (gameState.isBlocked(pos)) {
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.15f),
+                        start = Offset(cx + cellSizePx * 0.3f, cy + pad + 2f),
+                        end = Offset(cx + cellSizePx * 0.7f, cy + cellSizePx - pad - 2f),
+                        strokeWidth = 3f
+                    )
+                    // Skip number & ring for bricks.
+                    continue
+                }
 
                 // Pul ring target
                 if (!cell.isVisited && cell.number == gameState.nextNumber) {

@@ -26,14 +26,18 @@ data class Cell(
  *
  * Modes:
  * - SIMPLE: win when all numbers connected in order.
- * - CHALLENGE: win when all numbers connected in order AND every cell is filled.
+ * - CHALLENGE: grid has brick/blocked cells (impassable). Player must drag a
+ *              path that visits ALL open (non-brick) cells, connecting the
+ *              numbers in order, winding around the blocks.
  */
 class GameState(
     val rows: Int,
     val cols: Int,
     val numberPositions: Map<Int, Position>,
     val totalNumbers: Int,
-    val mode: GameMode = GameMode.SIMPLE
+    val mode: GameMode = GameMode.SIMPLE,
+    /** Brick cells that block the path (challenge mode). */
+    val blocks: Set<Position> = emptySet()
 ) {
     var grid by mutableStateOf(createEmptyGrid())
         private set
@@ -58,8 +62,10 @@ class GameState(
 
     val nextNumber: Int get() = connectedNumbers + 1
 
-    /** How many total cells must be filled to win in challenge mode. */
-    val totalCells: Int get() = rows * cols
+    /** Number of open (non-brick) cells the player must cover. */
+    val openCellCount: Int get() = rows * cols - blocks.size
+
+    val isBlocked: (Position) -> Boolean = { blocks.contains(it) }
 
     fun isNumbered(pos: Position): Boolean = grid[pos.row][pos.col].number != null
 
@@ -76,6 +82,7 @@ class GameState(
         if (row !in 0 until rows || col !in 0 until cols) return false
 
         val pos = Position(row, col)
+        if (pos in blocks) return false
         if (pos in path) return false
 
         val cell = grid[row][col]
@@ -141,16 +148,23 @@ class GameState(
         return true
     }
 
-    private fun checkCompletion() {
-        if (connectedNumbers != totalNumbers) return
+    /** True when the player covered every open cell but the route is wrong (challenge). */
+    val isWrongRoute: Boolean
+        get() = mode == GameMode.CHALLENGE &&
+            connectedNumbers == totalNumbers &&
+            path.size == openCellCount &&
+            !isComplete
 
+    private fun checkCompletion() {
         if (mode == GameMode.CHALLENGE) {
-            // Challenge: also require every cell filled.
-            if (path.size == totalCells) {
+            // Challenge: win when every open (non-brick) cell is covered and all numbers connected.
+            if (connectedNumbers == totalNumbers && path.size == openCellCount) {
                 isComplete = true
             }
         } else {
-            isComplete = true
+            if (connectedNumbers == totalNumbers) {
+                isComplete = true
+            }
         }
     }
 
