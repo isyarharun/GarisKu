@@ -12,8 +12,27 @@ object LevelGenerator {
 
     private val DIRS = listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)
 
+    /**
+     * Deterministic seed for a given mode + level, so the same level always
+     * produces the same puzzle. Combines the mode ordinal and level number
+     * into a stable Long.
+     */
+    fun seedFor(mode: GameMode, level: Int): Long {
+        val modeSalt = when (mode) {
+            GameMode.SIMPLE -> 0x517CC1B727220A95L
+            GameMode.CHALLENGE -> 0x6A09E667F3BCC909L
+        }
+        var h = modeSalt xor level.toLong()
+        h *= 0x100000001B3L
+        h = h xor (h ushr 33)
+        h *= 0x100000001B3L
+        h = h xor (h ushr 33)
+        return h
+    }
+
     /** Random Hamiltonian path over all cells — Warnsdorff DFS. */
-    fun generateHamiltonianPath(rows: Int, cols: Int, random: Random = Random.Default): List<Position> {
+    fun generateHamiltonianPath(rows: Int, cols: Int, seed: Long): List<Position> {
+        val random = Random(seed)
         require(rows >= 2 && cols >= 2)
         val total = rows * cols
         repeat(30) {
@@ -69,7 +88,8 @@ object LevelGenerator {
     }
 
     /** Place numbers along path with segment lengths 2..4. */
-    fun placeNumbers(path: List<Position>, count: Int, random: Random = Random.Default): Map<Int, Position> {
+    fun placeNumbers(path: List<Position>, count: Int, seed: Long): Map<Int, Position> {
+        val random = Random(seed)
         require(count >= 2)
         val nSegments = count - 1
         val totalSteps = path.size - 1
@@ -111,14 +131,15 @@ object LevelGenerator {
     }
 
     /** SIMPLE: random window of a Hamiltonian path. */
-    fun generateSimplePath(rows: Int, cols: Int, numberCount: Int, random: Random = Random.Default): Map<Int, Position> {
+    fun generateSimplePath(rows: Int, cols: Int, numberCount: Int, seed: Long): Map<Int, Position> {
+        val random = Random(seed)
         require(rows >= 2 && cols >= 2)
-        val full = generateHamiltonianPath(rows, cols, random)
+        val full = generateHamiltonianPath(rows, cols, seed)
         val need = (numberCount * 3).coerceIn(4, full.size)
         val maxStart = full.size - need
         val startIdx = if (maxStart <= 0) 0 else random.nextInt(maxStart + 1)
         val window = full.subList(startIdx, startIdx + need)
-        return placeNumbers(window, numberCount, random)
+        return placeNumbers(window, numberCount, seed)
     }
 
     /**
@@ -130,14 +151,15 @@ object LevelGenerator {
      */
     fun generateBrickLevel(
         rows: Int, cols: Int, numberCount: Int,
-        maxBrickCount: Int = 5, random: Random = Random.Default
+        maxBrickCount: Int = 5, seed: Long
     ): BrickLevel {
+        val random = Random(seed)
         require(rows >= 4 && cols >= 4)
-        val mirrored = generateHamiltonianPath(rows, cols, random)
+        val mirrored = generateHamiltonianPath(rows, cols, seed)
         // Always at least 1 brick so every challenge level has an obstacle.
         val brickCount = 1 + random.nextInt(maxBrickCount)
         if (brickCount == 0) {
-            val numbers = placeNumbers(mirrored, numberCount, random)
+            val numbers = placeNumbers(mirrored, numberCount, seed)
             return BrickLevel(mirrored, emptySet(), numbers)
         }
 
@@ -172,14 +194,14 @@ object LevelGenerator {
             // Verify a real Hamiltonian path exists over the open cells (bounded DFS).
             val solution = hamiltonianOnOpen(openCells, rows, cols, random) ?: return@repeat
 
-            val numbers = placeNumbers(solution, numberCount, random)
+            val numbers = placeNumbers(solution, numberCount, seed)
             return BrickLevel(solution, blocks, numbers)
         }
 
         // Fallback: tail bricks (guaranteed solvable, may cluster).
         val fbp = mirrored.dropLast(brickCount)
         val fbb = mirrored.takeLast(brickCount).toSet()
-        val fbn = placeNumbers(fbp, numberCount, random)
+        val fbn = placeNumbers(fbp, numberCount, seed)
         return BrickLevel(fbp, fbb, fbn)
     }
 

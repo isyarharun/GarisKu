@@ -38,44 +38,13 @@ private val WinOverlay = GreenSuccess.copy(alpha = 0.55f) // #4CAF50
 private val BrickColor = Color(0xFF37474F)   // bata abu-abu biru (blocked cell)
 
 private fun buildLevel(mode: GameMode, levelNumber: Int): GameState {
-    val random = kotlin.random.Random.Default
-    // Difficulty scaling: grid grows every 5 levels, capped at 10x10.
-    val gridSize = (4 + (levelNumber - 1) / 5).coerceIn(4, 10)
-    val cells = gridSize * gridSize
-    return when (mode) {
-        GameMode.SIMPLE -> {
-            // Numbers keep growing with level (+1 every 2 levels), capped at half the cells.
-            val numbers = (gridSize + kotlin.random.Random.nextInt(0, 2) + (levelNumber - 1) / 2)
-                .coerceIn(4, cells / 2)
-            val positions = LevelGenerator.generateSimplePath(gridSize, gridSize, numbers, random)
-            GameState(rows = gridSize, cols = gridSize, numberPositions = positions, totalNumbers = numbers, mode = mode)
-        }
-        GameMode.CHALLENGE -> {
-            // Phased difficulty:
-            //  Phase 1 (grid growth): numbers grow with grid so the route lengthens.
-            //  Phase 2 (sparsification, once grid caps at 10x10): numbers DECREASE
-            //    so segments grow long and the player must plan the route.
-            //    More numbers = easier (dense waypoints force the path), so fewer is harder.
-            val maxNumbers = cells / 3
-            val phase1 = gridSize + gridSize / 2 + (levelNumber - 15) / 4
-            val phase2 = 16 - (levelNumber - 15) / 4
-            val numbers = if (gridSize >= 10) {
-                phase2.coerceIn(6, maxNumbers)
-            } else {
-                phase1.coerceIn(minOf(6, maxNumbers), maxNumbers)
-            }
-            // A few random bricks (max 5) that keep the route solvable.
-            val brickMax = 5
-            val brick = LevelGenerator.generateBrickLevel(
-                gridSize, gridSize, numbers, brickMax, random
-            )
-            GameState(
-                rows = gridSize, cols = gridSize,
-                numberPositions = brick.numberPositions, totalNumbers = numbers,
-                mode = mode, blocks = brick.blocks
-            )
-        }
-    }
+    // Levels are pre-generated data (assets) → instant load, no runtime DFS.
+    val data = LevelRepository.getLevel(mode, levelNumber)
+        ?: return LevelFactory.build(mode, levelNumber)   // fallback safety
+    return GameState(
+        data.rows, data.cols, data.numberPositions,
+        data.numberPositions.size, mode, data.blocks
+    )
 }
 
 private fun formatTime(seconds: Int): String {
@@ -85,11 +54,13 @@ private fun formatTime(seconds: Int): String {
 }
 
 @Composable
-fun GarisKuGame(modifier: Modifier = Modifier) {
-    var mode by remember { mutableStateOf(GameMode.SIMPLE) }
-    // Load saved level for the current mode.
-    var levelNumber by remember { mutableStateOf(LevelProgress.getCurrentLevel(GameMode.SIMPLE)) }
-
+fun GarisKuGame(
+    mode: GameMode,
+    levelNumber: Int,
+    onExit: () -> Unit,
+    onNextLevel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     // (Re)create the game state when mode or level changes → fresh generated level.
     val gameState = remember(mode, levelNumber) {
         buildLevel(mode, levelNumber)
@@ -108,7 +79,16 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
     // Auto-save progress when a level is completed (next level unlocked).
     LaunchedEffect(gameState.isComplete) {
         if (gameState.isComplete) {
-            LevelProgress.saveCurrentLevel(mode, levelNumber + 1)
+            LevelProgress.markCompleted(mode, levelNumber)
+            LevelProgress.unlockNext(mode, levelNumber)
+        }
+    }
+
+    // Auto-advance: shortly after completion, jump straight to the next level.
+    LaunchedEffect(gameState.isComplete) {
+        if (gameState.isComplete && levelNumber < LEVELS_PER_MODE) {
+            delay(1500)
+            onNextLevel()
         }
     }
 
@@ -129,26 +109,6 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
     ) {
         // ── Title ────────────────────────────────────────
         Text("GarisKu", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // ── Mode selector ────────────────────────────────
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            ModeButton("Simple", mode == GameMode.SIMPLE) {
-                if (mode != GameMode.SIMPLE) {
-                    LevelProgress.saveCurrentLevel(mode, levelNumber)
-                    mode = GameMode.SIMPLE
-                    levelNumber = LevelProgress.getCurrentLevel(GameMode.SIMPLE)
-                }
-            }
-            ModeButton("Challenge", mode == GameMode.CHALLENGE) {
-                if (mode != GameMode.CHALLENGE) {
-                    LevelProgress.saveCurrentLevel(mode, levelNumber)
-                    mode = GameMode.CHALLENGE
-                    levelNumber = LevelProgress.getCurrentLevel(GameMode.CHALLENGE)
-                }
-            }
-        }
 
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -191,34 +151,17 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // ── Reset / Level Baru ──────────────────────────
+        // ── Reset / Level ───────────────────────────────
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(
                 onClick = { gameState.reset() },
                 colors = ButtonDefaults.buttonColors(containerColor = CellEmpty)
             ) { Text("🔄 Ulang", color = Color.White, fontSize = 15.sp) }
             Button(
-                onClick = {
-                    levelNumber++
-                    LevelProgress.saveCurrentLevel(mode, levelNumber)
-                },
+                onClick = onExit,
                 colors = ButtonDefaults.buttonColors(containerColor = CellNumbered)
-            ) { Text("🎲 Level Baru", color = Color.White, fontSize = 15.sp) }
+            ) { Text("🔢 Level", color = Color.White, fontSize = 15.sp) }
         }
-    }
-}
-
-@Composable
-private fun ModeButton(label: String, selected: Boolean, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (selected) TargetRing else CellEmpty,
-            contentColor = Color.White
-        ),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
-    ) {
-        Text(label, fontSize = 15.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -281,6 +224,29 @@ private fun GameGrid(
                     dragPos = down.position
                     lastDragCell = Position(row, col)
 
+                    // Applies connect/undo logic for a single cell.
+                    // Backward: undo ONLY one step, and only when the finger
+                    // touches the path cell right before the tip — so retracing
+                    // always follows the exact drawn path, never jumps.
+                    fun processCell(cell: Position) {
+                        val gPath = gameState.path
+                        if (gPath.isEmpty()) return
+                        val tip = gPath.last()
+
+                        if (cell == tip) return
+
+                        if (gPath.size >= 2 && cell == gPath[gPath.size - 2]) {
+                            // Finger moved back onto the previous path cell → undo one step.
+                            gameState.undo()
+                        } else if (cell !in gPath) {
+                            // Forward: only connect if adjacent to the CURRENT tip.
+                            if (cell.isAdjacentTo(tip)) {
+                                gameState.tryConnect(cell.row, cell.col)
+                            }
+                        }
+                        // Any other visited cell: ignore — no jumping.
+                    }
+
                     do {
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull() ?: break
@@ -295,22 +261,7 @@ private fun GameGrid(
                             val newCell = Position(frow, fcol)
 
                             if (newCell != lastDragCell) {
-                                val gPath = gameState.path
-                                val idxInPath = gPath.indexOf(newCell)
-
-                                if (idxInPath >= 0 && idxInPath < gPath.size - 1) {
-                                    // Retracing an already-visited cell → undo back to it.
-                                    while (gameState.path.size > idxInPath + 1) {
-                                        if (!gameState.undo()) break
-                                    }
-                                } else if (idxInPath < 0) {
-                                    // Forward: only connect if adjacent to the CURRENT tip.
-                                    val tip = gameState.path.lastOrNull()
-                                    if (tip != null && newCell.isAdjacentTo(tip)) {
-                                        gameState.tryConnect(frow, fcol)
-                                    }
-                                }
-                                // If newCell is the current tip, do nothing.
+                                processCell(newCell)
                                 lastDragCell = newCell
                             }
 

@@ -135,7 +135,8 @@ class GameState(
 
     fun undo(): Boolean {
         if (path.isEmpty()) return false
-        if (isComplete) isComplete = false
+        // Level sudah selesai → kemenangan tidak boleh dibatalkan oleh undo.
+        if (isComplete) return false
         hasError = false
 
         val last = path.last()
@@ -157,8 +158,15 @@ class GameState(
 
     private fun checkCompletion() {
         if (mode == GameMode.CHALLENGE) {
-            // Challenge: win when every open (non-brick) cell is covered and all numbers connected.
-            if (connectedNumbers == totalNumbers && path.size == openCellCount) {
+            // Challenge: cover every open cell AND finish ON the last number —
+            // the final tile of the path must be number totalNumbers.
+            val last = path.lastOrNull()
+            val endsOnLastNumber =
+                last != null && grid[last.row][last.col].number == totalNumbers
+            if (connectedNumbers == totalNumbers &&
+                path.size == openCellCount &&
+                endsOnLastNumber
+            ) {
                 isComplete = true
             }
         } else {
