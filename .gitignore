@@ -4,3 +4,9 @@
 build
 local.properties
 .cxx
+.codebase-memory/
+.claude/
+.cursor/
+.github/
+.vscode/
+.zed/
