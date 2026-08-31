@@ -88,6 +88,7 @@ fun GarisKuGame(
     // Auto-save progress when a level is completed (next level unlocked).
     LaunchedEffect(gameState.isComplete) {
         if (gameState.isComplete) {
+            SoundManager.playWin()
             LevelProgress.saveElapsedSeconds(mode, levelNumber, gameState.elapsedSeconds)
             LevelProgress.markCompleted(mode, levelNumber)
             LevelProgress.unlockNext(mode, levelNumber)
@@ -236,9 +237,11 @@ private fun GameGrid(
                         .coerceIn(0, gameState.rows - 1)
 
                     if (!gameState.tryConnect(row, col)) {
+                        SoundManager.playError()
                         do { } while (awaitPointerEvent().changes.any { it.pressed.not() })
                         return@awaitEachGesture
                     }
+                    SoundManager.playTick()
 
                     isDragging = true
                     dragPos = down.position
@@ -258,10 +261,15 @@ private fun GameGrid(
                         if (gPath.size >= 2 && cell == gPath[gPath.size - 2]) {
                             // Finger moved back onto the previous path cell → undo one step.
                             gameState.undo()
+                            SoundManager.playUndo()
                         } else if (cell !in gPath) {
                             // Forward: only connect if adjacent to the CURRENT tip.
                             if (cell.isAdjacentTo(tip)) {
-                                gameState.tryConnect(cell.row, cell.col)
+                                if (gameState.tryConnect(cell.row, cell.col)) {
+                                    SoundManager.playTick()
+                                } else {
+                                    SoundManager.playError()
+                                }
                             }
                         }
                         // Any other visited cell: ignore — no jumping.

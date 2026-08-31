@@ -18,6 +18,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         LevelProgress.init(this)
         LevelRepository.init(this)
+        SoundManager.init(this)
         setContent {
             Surface(
                 modifier = Modifier.fillMaxSize(),
@@ -26,6 +27,11 @@ class MainActivity : ComponentActivity() {
                 GarisKuApp()
             }
         }
+    }
+
+    override fun onDestroy() {
+        SoundManager.release()
+        super.onDestroy()
     }
 }
 
