@@ -31,6 +31,9 @@ object LevelProgress {
         GameMode.CHALLENGE -> KEY_CHALLENGE_COMPLETED
     }
 
+    private fun elapsedKey(mode: GameMode, level: Int): String =
+        "elapsed_${mode.name.lowercase()}_$level"
+
     /** Highest unlocked level for a mode (defaults to 1). */
     fun getMaxUnlocked(mode: GameMode): Int =
         prefs?.getInt(unlockedKey(mode), 1) ?: 1
@@ -59,5 +62,13 @@ object LevelProgress {
         if (level >= current) {
             prefs?.edit()?.putInt(unlockedKey(mode), level + 1)?.apply()
         }
+    }
+
+    /** Cumulative elapsed seconds spent on this level (across retries/sessions). */
+    fun getElapsedSeconds(mode: GameMode, level: Int): Int =
+        prefs?.getInt(elapsedKey(mode, level), 0) ?: 0
+
+    fun saveElapsedSeconds(mode: GameMode, level: Int, seconds: Int) {
+        prefs?.edit()?.putInt(elapsedKey(mode, level), seconds)?.apply()
     }
 }

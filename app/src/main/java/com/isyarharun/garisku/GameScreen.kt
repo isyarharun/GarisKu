@@ -39,11 +39,20 @@ private val BrickColor = Color(0xFF37474F)   // bata abu-abu biru (blocked cell)
 
 private fun buildLevel(mode: GameMode, levelNumber: Int): GameState {
     // Levels are pre-generated data (assets) → instant load, no runtime DFS.
+    val elapsed = LevelProgress.getElapsedSeconds(mode, levelNumber)
     val data = LevelRepository.getLevel(mode, levelNumber)
-        ?: return LevelFactory.build(mode, levelNumber)   // fallback safety
+    if (data != null) {
+        return GameState(
+            data.rows, data.cols, data.numberPositions,
+            data.numberPositions.size, mode, data.blocks,
+            initialElapsedSeconds = elapsed
+        )
+    }
+    // Fallback safety.
+    val gs = LevelFactory.build(mode, levelNumber)
     return GameState(
-        data.rows, data.cols, data.numberPositions,
-        data.numberPositions.size, mode, data.blocks
+        gs.rows, gs.cols, gs.numberPositions, gs.totalNumbers, mode, gs.blocks,
+        initialElapsedSeconds = elapsed
     )
 }
 
@@ -79,6 +88,7 @@ fun GarisKuGame(
     // Auto-save progress when a level is completed (next level unlocked).
     LaunchedEffect(gameState.isComplete) {
         if (gameState.isComplete) {
+            LevelProgress.saveElapsedSeconds(mode, levelNumber, gameState.elapsedSeconds)
             LevelProgress.markCompleted(mode, levelNumber)
             LevelProgress.unlockNext(mode, levelNumber)
         }
@@ -92,11 +102,21 @@ fun GarisKuGame(
         }
     }
 
-    // Timer tick
-    LaunchedEffect(gameState.timerStarted) {
+    // Timer tick — cumulative across retries: stops on completion,
+    // resumes automatically once the level is reset and retried.
+    LaunchedEffect(gameState.timerStarted, gameState.isComplete) {
         while (gameState.timerStarted && !gameState.isComplete) {
             delay(1000)
             gameState.tickSecond()
+            LevelProgress.saveElapsedSeconds(mode, levelNumber, gameState.elapsedSeconds)
+        }
+    }
+
+    // Save the cumulative timer whenever the game screen is left (grid/menu),
+    // so re-selecting the same level resumes where it left off.
+    DisposableEffect(mode, levelNumber) {
+        onDispose {
+            LevelProgress.saveElapsedSeconds(mode, levelNumber, gameState.elapsedSeconds)
         }
     }
 

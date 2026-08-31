@@ -37,7 +37,9 @@ class GameState(
     val totalNumbers: Int,
     val mode: GameMode = GameMode.SIMPLE,
     /** Brick cells that block the path (challenge mode). */
-    val blocks: Set<Position> = emptySet()
+    val blocks: Set<Position> = emptySet(),
+    /** Cumulative elapsed seconds carried over from previous attempts. */
+    initialElapsedSeconds: Int = 0
 ) {
     var grid by mutableStateOf(createEmptyGrid())
         private set
@@ -51,8 +53,8 @@ class GameState(
     var hasError by mutableStateOf(false)
         private set
 
-    /** Timer: elapsed seconds since first connection. */
-    var elapsedSeconds by mutableStateOf(0)
+    /** Timer: cumulative elapsed seconds across retries/sessions for this level. */
+    var elapsedSeconds by mutableStateOf(initialElapsedSeconds)
         private set
 
     var timerStarted by mutableStateOf(false)
@@ -115,11 +117,11 @@ class GameState(
     }
 
     fun reset() {
+        // Cumulative timer: elapsedSeconds & timerStarted are intentionally
+        // NOT reset — "Ulang" restarts the puzzle, not the total clock.
         path = emptyList()
         isComplete = false
         hasError = false
-        elapsedSeconds = 0
-        timerStarted = false
         grid = createEmptyGrid()
     }
 
