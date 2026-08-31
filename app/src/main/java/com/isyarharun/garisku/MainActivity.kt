@@ -12,6 +12,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        LevelProgress.init(this)
         setContent {
             Surface(
                 modifier = Modifier.fillMaxSize(),

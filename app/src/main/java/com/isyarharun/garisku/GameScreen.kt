@@ -87,7 +87,8 @@ private fun formatTime(seconds: Int): String {
 @Composable
 fun GarisKuGame(modifier: Modifier = Modifier) {
     var mode by remember { mutableStateOf(GameMode.SIMPLE) }
-    var levelNumber by remember { mutableStateOf(1) }
+    // Load saved level for the current mode.
+    var levelNumber by remember { mutableStateOf(LevelProgress.getCurrentLevel(GameMode.SIMPLE)) }
 
     // (Re)create the game state when mode or level changes → fresh generated level.
     val gameState = remember(mode, levelNumber) {
@@ -103,6 +104,13 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
         targetValue = if (gameState.hasError) 1f else 0f,
         animationSpec = tween(200), label = "errorShake"
     )
+
+    // Auto-save progress when a level is completed (next level unlocked).
+    LaunchedEffect(gameState.isComplete) {
+        if (gameState.isComplete) {
+            LevelProgress.saveCurrentLevel(mode, levelNumber + 1)
+        }
+    }
 
     // Timer tick
     LaunchedEffect(gameState.timerStarted) {
@@ -127,10 +135,18 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
         // ── Mode selector ────────────────────────────────
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             ModeButton("Simple", mode == GameMode.SIMPLE) {
-                mode = GameMode.SIMPLE; levelNumber = 1
+                if (mode != GameMode.SIMPLE) {
+                    LevelProgress.saveCurrentLevel(mode, levelNumber)
+                    mode = GameMode.SIMPLE
+                    levelNumber = LevelProgress.getCurrentLevel(GameMode.SIMPLE)
+                }
             }
             ModeButton("Challenge", mode == GameMode.CHALLENGE) {
-                mode = GameMode.CHALLENGE; levelNumber = 1
+                if (mode != GameMode.CHALLENGE) {
+                    LevelProgress.saveCurrentLevel(mode, levelNumber)
+                    mode = GameMode.CHALLENGE
+                    levelNumber = LevelProgress.getCurrentLevel(GameMode.CHALLENGE)
+                }
             }
         }
 
@@ -182,7 +198,10 @@ fun GarisKuGame(modifier: Modifier = Modifier) {
                 colors = ButtonDefaults.buttonColors(containerColor = CellEmpty)
             ) { Text("🔄 Ulang", color = Color.White, fontSize = 15.sp) }
             Button(
-                onClick = { levelNumber++ },
+                onClick = {
+                    levelNumber++
+                    LevelProgress.saveCurrentLevel(mode, levelNumber)
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = CellNumbered)
             ) { Text("🎲 Level Baru", color = Color.White, fontSize = 15.sp) }
         }
