@@ -235,17 +235,24 @@ private fun GameGrid(
                         .coerceIn(0, gameState.cols - 1)
                     val row = (down.position.y / cellSizePx).toInt()
                         .coerceIn(0, gameState.rows - 1)
+                    val touchedPos = Position(row, col)
 
-                    if (!gameState.tryConnect(row, col)) {
-                        SoundManager.playError()
-                        do { } while (awaitPointerEvent().changes.any { it.pressed.not() })
-                        return@awaitEachGesture
+                    // Allow re-touching the tip of the path to continue dragging
+                    // after lifting the finger. Without this, tryConnect rejects
+                    // the tip because it's already in `path`.
+                    val pathTip = gameState.path.lastOrNull()
+                    if (touchedPos != pathTip) {
+                        if (!gameState.tryConnect(row, col)) {
+                            SoundManager.playError()
+                            do { } while (awaitPointerEvent().changes.any { it.pressed.not() })
+                            return@awaitEachGesture
+                        }
+                        SoundManager.playTick()
                     }
-                    SoundManager.playTick()
 
                     isDragging = true
                     dragPos = down.position
-                    lastDragCell = Position(row, col)
+                    lastDragCell = touchedPos
 
                     // Applies connect/undo logic for a single cell.
                     // Backward: undo ONLY one step, and only when the finger
