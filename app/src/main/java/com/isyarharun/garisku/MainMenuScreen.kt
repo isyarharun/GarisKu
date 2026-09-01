@@ -51,6 +51,14 @@ private fun ModeSelectScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+        // Music toggle — top-right of menu
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            MusicToggleButton()
+        }
+
         Text("GarisKu", color = Color.White, fontSize = 40.sp, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(8.dp))
         Text(
@@ -71,6 +79,29 @@ private fun ModeSelectScreen(
             subtitle = "Lewati semua sel, hindari bata 🧱",
             emoji = "🧩",
             onClick = { onSelect(GameMode.CHALLENGE) }
+        )
+
+        Spacer(modifier = Modifier.height(32.dp))
+        Text(
+            "Music: Wallpaper — Kevin MacLeod (incompetech.com), CC-BY 4.0",
+            color = OnSurfaceVariantDark.copy(alpha = 0.6f), fontSize = 10.sp
+        )
+    }
+}
+
+@Composable
+private fun MusicToggleButton() {
+    var enabled by remember { mutableStateOf(MusicManager.isEnabled()) }
+    Button(
+        onClick = { enabled = MusicManager.toggle() },
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (enabled) GreenPrimaryDark else SurfaceVariantDark
+        ),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+    ) {
+        Text(
+            if (enabled) "🔊" else "🔇",
+            fontSize = 16.sp
         )
     }
 }

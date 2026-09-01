@@ -19,6 +19,7 @@ class MainActivity : ComponentActivity() {
         LevelProgress.init(this)
         LevelRepository.init(this)
         SoundManager.init(this)
+        MusicManager.init(this)
         setContent {
             Surface(
                 modifier = Modifier.fillMaxSize(),
@@ -29,7 +30,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // Music plays on the menu (and keeps playing while in-game unless muted).
+        MusicManager.start()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        MusicManager.pause()
+    }
+
     override fun onDestroy() {
+        MusicManager.release()
         SoundManager.release()
         super.onDestroy()
     }
