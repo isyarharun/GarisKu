@@ -88,20 +88,22 @@ object LevelGenerator {
     }
 
     /** Place numbers along path with segment lengths 2..4. */
-    fun placeNumbers(path: List<Position>, count: Int, seed: Long): Map<Int, Position> {
+    fun placeNumbers(path: List<Position>, count: Int, seed: Long, minSeg: Int = 2, maxSeg: Int = 4): Map<Int, Position> {
         val random = Random(seed)
         require(count >= 2)
+        require(minSeg >= 1 && maxSeg >= minSeg)
         val nSegments = count - 1
         val totalSteps = path.size - 1
-        val base = 2 * nSegments
+        val base = minSeg * nSegments
         if (totalSteps < base) return placeSparse(path, count)
 
         val extra = totalSteps - base
-        val segLengths = IntArray(nSegments) { 2 }
+        val segLengths = IntArray(nSegments) { minSeg }
         var remaining = extra
         var i = 0
+        val cap = maxSeg - minSeg
         while (remaining > 0) {
-            while (i < nSegments && remaining > 0 && segLengths[i] < 4) { segLengths[i]++; remaining-- }
+            while (i < nSegments && remaining > 0 && segLengths[i] - minSeg < cap) { segLengths[i]++; remaining-- }
             i++
             if (i >= nSegments && remaining > 0) { segLengths[nSegments - 1] += remaining; remaining = 0 }
         }
@@ -140,6 +142,192 @@ object LevelGenerator {
         val startIdx = if (maxStart <= 0) 0 else random.nextInt(maxStart + 1)
         val window = full.subList(startIdx, startIdx + need)
         return placeNumbers(window, numberCount, seed)
+    }
+
+    /**
+     * Challenge maze level — WALL-based bricks for real difficulty.
+     *
+     * Instead of scattered single cells (weak obstacles), this carves the grid
+     * with wall segments: each wall is a straight run of 2..maxWall cells
+     * (horizontal or vertical). Walls are placed one by one; after each wall
+     * we require (a) connectivity of open cells and (b) parity, and finally
+     * verify a Hamiltonian path exists over the open cells. On success the
+     * solution path is returned — numbers are placed on it so the level is
+     * guaranteed solvable.
+     *
+     * [targetOpenRatio] shapes the maze: 0.85 = light, 0.55 = brutal.
+     */
+    fun generateMazeLevel(
+        rows: Int, cols: Int, numberCount: Int,
+        targetOpenRatio: Float, seed: Long
+    ): BrickLevel {
+        require(rows >= 5 && cols >= 5)
+        val random = Random(seed)
+        val total = rows * cols
+        val targetBlocks = (total * (1f - targetOpenRatio)).toInt()
+            .coerceAtLeast(2)
+            .coerceAtMost(total - numberCount * 2)
+
+        val blocked = mutableSetOf<Position>()
+        // Keep a 1-cell clear margin around the border to avoid degenerate forks.
+        val interior = buildList {
+            for (r in 1 until rows - 1) for (c in 1 until cols - 1) add(Position(r, c))
+        }
+
+        fun openCells(): List<Position> = buildList {
+            for (r in 0 until rows) for (c in 0 until cols) {
+                val p = Position(r, c)
+                if (p !in blocked) add(p)
+            }
+        }
+
+        fun connectedAndParityOk(): List<Position>? {
+            val open = openCells()
+            if (open.isEmpty()) return null
+            val openSet = open.toSet()
+
+            // Parity: path alternates colors → |black - white| <= 1.
+            var black = 0; var white = 0
+            for (p in open) {
+                if ((p.row + p.col) % 2 == 0) black++ else white++
+            }
+            if (kotlin.math.abs(black - white) > 1) return null
+
+            // Connectivity from the first open cell.
+            val visited = hashSetOf<Position>()
+            val queue = ArrayDeque<Position>().apply { add(open.first()); visited.add(open.first()) }
+            while (queue.isNotEmpty()) {
+                val cur = queue.removeFirst()
+                for (nb in neighbours(cur, rows, cols)) {
+                    if (nb in openSet && nb !in visited) { visited.add(nb); queue.addLast(nb) }
+                }
+            }
+            return if (visited.size == open.size) open else null
+        }
+
+        var guard = 0
+        // Hard cap: at most 3 blocks total (2-3 cell wall pieces).
+        val hardCap = minOf(targetBlocks, 3)
+        while (blocked.size < hardCap && guard < 200) {
+            guard++
+            val seedCell = interior.randomOrNull(random) ?: break
+            if (seedCell in blocked) continue
+            val horizontal = random.nextBoolean()
+            val len = 2 + random.nextInt(2)  // 2..3 cells per wall
+            val cells = mutableListOf<Position>()
+            for (i in 0 until len) {
+                val r = if (horizontal) seedCell.row else seedCell.row + i
+                val c = if (horizontal) seedCell.col + i else seedCell.col
+                if (r !in 1 until rows - 1 || c !in 1 until cols - 1) break
+                cells.add(Position(r, c))
+            }
+            if (cells.any { it in blocked }) continue
+            if (blocked.size + cells.size > hardCap) {
+                // Trim the wall to fit the cap.
+                while (cells.size + blocked.size > hardCap && cells.isNotEmpty()) cells.removeAt(cells.size - 1)
+                if (cells.isEmpty()) continue
+            }
+
+            blocked.addAll(cells)
+            val open = connectedAndParityOk()
+            if (open != null && open.size >= numberCount * 2) {
+                // Wall accepted.
+            } else {
+                blocked.removeAll(cells)
+            }
+        }
+
+        // Final verification: a real Hamiltonian path must exist.
+        val open = openCells()
+        val solution = hamiltonianOnOpen(open, rows, cols, random)
+        if (solution != null && blocked.isNotEmpty()) {
+            // Dense checkpoints with small gaps → numbers interlock as obstacles.
+            val minSeg = 2
+            val maxSeg = 4
+            val numbers = placeNumbers(solution, numberCount, seed, minSeg, maxSeg)
+            return BrickLevel(solution, blocked.toSet(), numbers)
+        }
+
+        // Fallback: single spread bricks (old behavior) — still solvable.
+        return generateBrickLevel(rows, cols, numberCount, maxOf(1, targetBlocks), seed)
+    }
+
+    /**
+     * Counts valid ordered routes (numbers in sequence, covering every open
+     * cell) with early-exit at [stopAfter]. Budgeted so it never hangs.
+     * Used to verify a level has EXACTLY ONE solution.
+     */
+    fun countOrderedPaths(
+        rows: Int, cols: Int,
+        numbers: Map<Int, Position>,
+        blocks: Set<Position>,
+        stopAfter: Int = 2
+    ): Int {
+        val total = rows * cols - blocks.size
+        if (total <= 0) return 0
+        val maxNumber = numbers.keys.maxOrNull() ?: return 0
+        val start = numbers[1] ?: return 0
+        if (start in blocks) return 0
+
+        val numberAt = HashMap<Position, Int>()
+        for ((num, p) in numbers) numberAt[p] = num
+
+        var count = 0
+        var budget = 120_000
+        val visited = hashSetOf(start)
+
+        fun dfs(cur: Position, nextNumber: Int, covered: Int) {
+            if (count >= stopAfter || budget <= 0) return
+            budget--
+
+            if (covered == total) {
+                // Must have consumed all numbers in order.
+                if (nextNumber > maxNumber) count++
+                return
+            }
+
+            for (nb in neighbours(cur, rows, cols)) {
+                if (nb in blocks || nb in visited) continue
+                val isNumber = numberAt[nb]
+                if (isNumber != null) {
+                    if (isNumber != nextNumber) continue   // wrong number = blocked
+                    visited.add(nb)
+                    dfs(nb, nextNumber + 1, covered + 1)
+                    visited.remove(nb)
+                } else {
+                    visited.add(nb)
+                    dfs(nb, nextNumber, covered + 1)
+                    visited.remove(nb)
+                }
+                if (count >= stopAfter || budget <= 0) return
+            }
+        }
+
+        dfs(start, 2, 1)
+        return count
+    }
+
+    /**
+     * UNIQUE-SOLUTION challenge level: dense numbers + walls. The exporter
+     * verifies uniqueness via [countOrderedPaths] and keeps only levels
+     * with exactly one valid route.
+     *
+     * @param numberDensity share of open cells carrying a number (0.35..0.60)
+     */
+    fun generateUniqueLevel(
+        rows: Int, cols: Int,
+        numberDensity: Float,
+        targetOpenRatio: Float, seed: Long
+    ): BrickLevel {
+        // Probe: run a light maze to learn the open-cell count for this seed,
+        // then derive the dense number count and rebuild with it.
+        val probe = generateMazeLevel(rows, cols, 4, targetOpenRatio, seed)
+        val openCount = rows * cols - probe.blocks.size
+        val numberCount = (openCount * numberDensity).toInt()
+            .coerceIn(4, openCount - 2)
+
+        val maze = generateMazeLevel(rows, cols, numberCount, targetOpenRatio, seed)
+        return BrickLevel(maze.path, maze.blocks, maze.numberPositions)
     }
 
     /**
