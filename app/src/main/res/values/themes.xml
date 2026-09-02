@@ -5,4 +5,11 @@
         <item name="android:navigationBarColor">#FF121212</item>
         <item name="android:windowBackground">#FF121212</item>
     </style>
+
+    <!-- Splash: logo on dark background, then transitions to Theme.GarisKu -->
+    <style name="Theme.GarisKu.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/ic_launcher_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_logo</item>
+        <item name="postSplashScreenTheme">@style/Theme.GarisKu</item>
+    </style>
 </resources>
