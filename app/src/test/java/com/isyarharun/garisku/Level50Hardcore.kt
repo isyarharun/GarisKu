@@ -35,13 +35,7 @@ class Level50Hardcore {
             val routes = LevelGenerator.countOrderedPaths(rows, cols, maze.numberPositions, maze.blocks, stopAfter = 2)
             if (routes != 1) continue
 
-            val open = buildSet {
-                for (r in 0 until rows) for (c in 0 until cols) {
-                    val p = Position(r, c)
-                    if (p !in maze.blocks) add(p)
-                }
-            }
-            val sc = DifficultyScorer.score(open, rows, cols, maze.blocks, maze.numberPositions)
+            val sc = DifficultyScorer.score(rows, cols, maze.blocks, maze.numberPositions)
             if (sc.total > bestScore) {
                 bestScore = sc.total
                 best = GameState(rows, cols, maze.numberPositions, numbers, GameMode.CHALLENGE, maze.blocks)

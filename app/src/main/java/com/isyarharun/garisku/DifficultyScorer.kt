@@ -1,70 +1,57 @@
 package com.isyarharun.garisku
 
+import kotlin.math.ln
+
 /**
- * Scores how HARD a challenge level is, from the structure of its open-cell
- * graph. Used by the exporter for best-of-N candidate selection.
+ * Scores how HARD the DECISIONS in a challenge level are, from the player's
+ * point of view — not how the board looks.
  *
- * Score 0..100. Higher = harder.
+ * v1 scored board STRUCTURE (checkpoint density 40% / leaves 25% / gates 20% /
+ * tightness 15%). The 2026-09 experiments proved those signals broken for this
+ * generator: gates saturate on wide-open boards, leaves are ~always zero, and
+ * density is NOT monotonic with felt difficulty (high density = guided = easy;
+ * low density = ambiguous = hard). See DifficultyExperiment + RouteAnalyzer.
  *
- * Core insight for cover-all-cells puzzles with DENSE numbers: every
- * not-yet-reachable number is an OBSTACLE. Dense checkpoints + wide open
- * board = the route must thread narrow gaps in exactly the right order —
- * the player must simulate the whole path mentally.
+ * v2 measures decision difficulty on the unique-solution puzzle:
+ *  - nearSolutionFull  — routes consuming ALL numbers in order yet failing the
+ *    win condition ("looked finished, wasn't"). Log-scaled, capped at 256.
+ *  - nearSolutionPrefix — dead-ends reached with ≥60% of numbers consumed.
+ *  - (1 − forcedMoveRatio) — share of solution steps where the player faces a
+ *    REAL choice instead of a single forced continuation.
+ *  - meanDeviationDepth — how long a wrong turn survives before dead-ending
+ *    (backtracking / decision depth).
+ *  - avgBranching — legal options per step along the solution.
  *
- *  - Checkpoint density (share of open cells carrying a number): dominant.
- *    Dense numbers interlock as moving blockers.                      40%
- *  - Leaf cells (deg-1): each leaf MUST be a path endpoint; extra leaves
- *    create ordering puzzles.                                         25%
- *  - Gates / junctions: decision points where wrong turns dead-end.   20%
- *  - Tightness: smaller open ratio scores slightly higher.            15%
+ * Bricks and number density are generator KNOBS, deliberately NOT score inputs.
  */
 object DifficultyScorer {
 
     data class Score(
         val total: Int,
-        val leafRatio: Float,
-        val gateCount: Int,
-        val checkpointDensity: Float,
-        val openRatio: Float
+        val nearSolutionFull: Int,
+        val nearSolutionPrefix: Int,
+        val forcedMoveRatio: Float,
+        val meanDeviationDepth: Float,
+        val avgBranching: Float
     )
 
     fun score(
-        openCells: Set<Position>,
         rows: Int,
         cols: Int,
         blocks: Set<Position>,
         numbers: Map<Int, Position>
     ): Score {
-        if (openCells.isEmpty()) return Score(0, 0f, 0, 0f, 0f)
-        val n = openCells.size
-
-        // ── Checkpoint density (dominant signal) ────────────────
-        val density = (numbers.size.toFloat() / n).coerceIn(0f, 1f)
-        val densityN = ((density - 0.25f) / 0.40f).coerceIn(0f, 1f)  // 25% → 0, 65% → 1
-
-        // ── Degree stats: leaves & gates ────────────────────────
-        var leaves = 0
-        var gates = 0
-        for (p in openCells) {
-            var deg = 0
-            for (nb in neighbours(p, rows, cols)) if (nb in openCells) deg++
-            when {
-                deg == 1 -> leaves++
-                deg >= 3 -> gates++
-            }
-        }
-        val leafRatio = leaves.toFloat() / n
-        val leafN = (leafRatio / 0.20f).coerceIn(0f, 1f)              // 20% leaves → max
-        val gateN = (gates.toFloat() / n * 3f).coerceIn(0f, 1f)
-
-        // ── Tightness ───────────────────────────────────────────
-        val openRatio = n.toFloat() / (rows * cols)
-        val tightN = ((0.90f - openRatio) / 0.30f).coerceIn(0f, 1f)
-
-        val totalScore = 40f * densityN + 25f * leafN + 20f * gateN + 15f * tightN
+        val a = RouteAnalyzer.analyze(rows, cols, numbers, blocks)
+        val nearF = ln(1f + minOf(a.nearSolutionFull, 256).toFloat()) / ln(257f)
+        val nearP = ln(1f + minOf(a.nearSolutionPrefix, 256).toFloat()) / ln(257f)
+        val dec = 1f - a.forcedMoveRatio
+        val dev = minOf(a.meanDeviationDepth, 20f) / 20f
+        val br = ((a.avgBranching - 1.2f) / 0.5f).coerceIn(0f, 1f)
+        val totalScore = 30f * nearF + 20f * nearP + 20f * dec + 20f * dev + 10f * br
         return Score(
             totalScore.toInt().coerceIn(0, 100),
-            leafRatio, gates, density, openRatio
+            a.nearSolutionFull, a.nearSolutionPrefix,
+            a.forcedMoveRatio, a.meanDeviationDepth, a.avgBranching
         )
     }
 
@@ -73,9 +60,4 @@ object DifficultyScorer {
         if (candidates.isEmpty()) return null
         return candidates.minByOrNull { (_, s) -> kotlin.math.abs(s.total - target) }?.first
     }
-
-    private fun neighbours(p: Position, rows: Int, cols: Int): List<Position> = listOf(
-        Position(p.row - 1, p.col), Position(p.row + 1, p.col),
-        Position(p.row, p.col - 1), Position(p.row, p.col + 1)
-    ).filter { it.row in 0 until rows && it.col in 0 until cols }
 }

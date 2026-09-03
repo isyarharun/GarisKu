@@ -275,14 +275,17 @@ object LevelGenerator {
         var count = 0
         var budget = 120_000
         val visited = hashSetOf(start)
+        val end = numbers[maxNumber]
+        if (end in blocks) return 0
 
         fun dfs(cur: Position, nextNumber: Int, covered: Int) {
             if (count >= stopAfter || budget <= 0) return
             budget--
 
             if (covered == total) {
-                // Must have consumed all numbers in order.
-                if (nextNumber > maxNumber) count++
+                // Rule: all numbers consumed IN ORDER and the path ENDS on the
+                // last number's cell (mirrors the game's win condition).
+                if (nextNumber > maxNumber && cur == end) count++
                 return
             }
 
@@ -308,26 +311,154 @@ object LevelGenerator {
     }
 
     /**
-     * UNIQUE-SOLUTION challenge level: dense numbers + walls. The exporter
-     * verifies uniqueness via [countOrderedPaths] and keeps only levels
-     * with exactly one valid route.
+     * Finds the SECOND valid ordered route (if any) and returns its full cell
+     * list. Returns null when the level already has exactly one solution (or
+     * budget ran out before a second route was found).
      *
-     * @param numberDensity share of open cells carrying a number (0.35..0.60)
+     * Used by [generateBlockingLevel] to learn WHICH cells make alternative
+     * routes possible — those cells become brick candidates.
      */
-    fun generateUniqueLevel(
+    fun findSecondRoute(
+        rows: Int, cols: Int,
+        numbers: Map<Int, Position>,
+        blocks: Set<Position>
+    ): List<Position>? {
+        val total = rows * cols - blocks.size
+        if (total <= 0) return null
+        val maxNumber = numbers.keys.maxOrNull() ?: return null
+        val start = numbers[1] ?: return null
+        if (start in blocks) return null
+
+        val numberAt = HashMap<Position, Int>()
+        for ((num, p) in numbers) numberAt[p] = num
+
+        var found = 0
+        var budget = 150_000
+        var secondRoute: List<Position>? = null
+        val current = ArrayDeque<Position>()
+        current.addLast(start)
+        val visited = hashSetOf(start)
+        val end = numbers[maxNumber]
+        if (end in blocks) return null
+
+        fun dfs(cur: Position, nextNumber: Int, covered: Int) {
+            if (secondRoute != null || budget <= 0) return
+            budget--
+
+            if (covered == total) {
+                if (nextNumber > maxNumber && cur == end) {
+                    found++
+                    if (found == 2) {
+                        secondRoute = current.toList()   // capture the alternative
+                    }
+                }
+                return
+            }
+
+            for (nb in neighbours(cur, rows, cols)) {
+                if (nb in blocks || nb in visited) continue
+                val isNumber = numberAt[nb]
+                current.addLast(nb); visited.add(nb)
+                if (isNumber != null) {
+                    if (isNumber == nextNumber) {
+                        dfs(nb, nextNumber + 1, covered + 1)
+                    }
+                } else {
+                    dfs(nb, nextNumber, covered + 1)
+                }
+                current.removeLast(); visited.remove(nb)
+                if (secondRoute != null || budget <= 0) return
+            }
+        }
+
+        dfs(start, 2, 1)
+        return secondRoute
+    }
+
+    /**
+     * BLOCKING level — bricks are placed ON PURPOSE to kill alternative routes.
+     *
+     * Process (inverted from previous generators):
+     *  1. Full open board, generate a Hamiltonian solution path.
+     *  2. Place DENSE numbers on the solution path.
+     *  3. Count routes; find a second (alternative) route via DFS.
+     *  4. Cells that the alternative route uses but the solution does NOT
+     *     become brick candidates. Brick the most impactful one(s).
+     *  5. Repeat until exactly ONE route remains, or the brick budget
+     *     (maxBricks) is spent, or we run out of iterations → reject.
+     *
+     * The result: bricks exist precisely where they silence alternative
+     * routes — they CLOSE the board down to a single forced journey.
+     *
+     * @param numberDensity share of open cells carrying a number (0.45..0.62)
+     * @param maxBricks     hard cap on placed bricks (e.g. 3)
+     * @param minSeg        minimum segment length between consecutive numbers
+     * @param maxSeg        maximum segment length between consecutive numbers
+     */
+    fun generateBlockingLevel(
         rows: Int, cols: Int,
         numberDensity: Float,
-        targetOpenRatio: Float, seed: Long
+        maxBricks: Int, seed: Long,
+        minSeg: Int = 2, maxSeg: Int = 3
     ): BrickLevel {
-        // Probe: run a light maze to learn the open-cell count for this seed,
-        // then derive the dense number count and rebuild with it.
-        val probe = generateMazeLevel(rows, cols, 4, targetOpenRatio, seed)
-        val openCount = rows * cols - probe.blocks.size
-        val numberCount = (openCount * numberDensity).toInt()
-            .coerceIn(4, openCount - 2)
+        require(rows >= 5 && cols >= 5)
+        val random = Random(seed)
+        val total = rows * cols
 
-        val maze = generateMazeLevel(rows, cols, numberCount, targetOpenRatio, seed)
-        return BrickLevel(maze.path, maze.blocks, maze.numberPositions)
+        // 1. Solution path on a fully open board.
+        val solution = generateHamiltonianPath(rows, cols, seed)
+
+        // 2. Dense numbers on the solution. Segment gap is a tunable knob
+        //    (minSeg/maxSeg); baseline remains 2..3.
+        val numberCount = (total * numberDensity).toInt().coerceIn(4, total - 2)
+        var numbers = placeNumbers(solution, numberCount, seed, minSeg, maxSeg)
+
+        val blocked = mutableSetOf<Position>()
+
+        // 3-6. Iteratively brick away alternative routes.
+        // IMPORTANT: never brick cells ON the solution path — the solution is
+        // the only route guaranteed to end on the last number.
+        val solutionSet = solution.toSet()
+        var iterations = 0
+        while (iterations < 12) {
+            iterations++
+            val routes = countOrderedPaths(rows, cols, numbers, blocked, stopAfter = 2)
+            if (routes == 1) {
+                // Unique! The solution path is still fully open and ends on
+                // the last number — the level is solvable by design.
+                return BrickLevel(solution, blocked.toSet(), numbers)
+            }
+            if (blocked.size >= maxBricks) break
+
+            // Find one alternative route and diff it against the solution.
+            val alt = findSecondRoute(rows, cols, numbers, blocked) ?: break
+            val candidates = alt.filter { it !in solutionSet && it !in blocked }
+            if (candidates.isEmpty()) {
+                // Alternative reuses only solution cells (different ORDER).
+                // A brick can't fix ordering. Reshape the number placement
+                // deterministically (same solution path, salted seed) and
+                // retry the blocking loop from a clean board.
+                numbers = placeNumbers(solution, numberCount, seed + iterations * 104729L, minSeg, maxSeg)
+                blocked.clear()
+            } else {
+                // Brick the deviation cell closest to the board center
+                // (heuristic: central bricks kill more alternatives).
+                val cr = rows / 2f
+                val cc = cols / 2f
+                blocked.add(candidates.minByOrNull { p ->
+                    (p.row - cr) * (p.row - cr) + (p.col - cc) * (p.col - cc)
+                }!!)
+            }
+        }
+
+        // Not converged within budget — verify final state; if unique, accept.
+        val finalRoutes = countOrderedPaths(rows, cols, numbers, blocked, stopAfter = 2)
+        if (finalRoutes == 1) {
+            return BrickLevel(solution, blocked.toSet(), numbers)
+        }
+
+        // Reject: caller (exporter) will try another seed.
+        error("generateBlockingLevel: failed to converge to a unique solution")
     }
 
     /**
