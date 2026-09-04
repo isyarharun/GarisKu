@@ -61,6 +61,11 @@ private fun GarisKuApp() {
         screen = Screen.LEVEL_SELECT
     }
 
+    // Back gesture from the level grid returns to the main menu.
+    BackHandler(enabled = screen == Screen.LEVEL_SELECT) {
+        screen = Screen.MENU
+    }
+
     when (screen) {
         Screen.MENU -> MainMenuScreen(
             onPlay = { mode, level ->
