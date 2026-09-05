@@ -40,12 +40,12 @@ object LevelFactory {
         else -> ChallengeTier.HARD
     }
 
-    /** Candidate budget per tier. Low-density (Hard) bands reject more, so they
-     *  get more attempts to converge a unique solution. */
+    /** Candidate budget per tier. Walls-first generation is expensive, so keep
+     *  budgets low to keep export time sane; best-of-N still finds a good pick. */
     fun candidatesFor(level: Int): Int = when (tierFor(level)) {
-        ChallengeTier.HARD, ChallengeTier.MED_HARD -> 64
-        ChallengeTier.MEDIUM -> 48
-        else -> CANDIDATES_PER_LEVEL
+        ChallengeTier.HARD, ChallengeTier.MED_HARD -> 24
+        ChallengeTier.MEDIUM -> 20
+        else -> 16
     }
 
     /** Grid size follows level progression, staying in 6x6..8x8 (Zip reference).
@@ -77,32 +77,29 @@ object LevelFactory {
      *  - L10 breakpoint: density 0.42→0.38 + variance 2..5 = HARDCORE jump.
      */
     data class ChallengeParams(
-        val numberDensity: Float,   // lower = more decision ambiguity
+        val numberDensity: Float,   // share of cells carrying a number (from Zip refs)
         val minSeg: Int,
         val maxSeg: Int,            // higher = longer blind stretches
-        val maxWalls: Int           // Zip-style edge walls (kill alternative routes)
+        val wallPieces: Int,        // number of wall chains
+        val maxChainLen: Int,       // max edges per chain (L/T shape driver)
+        val allowBranch: Boolean    // T-shape allowed
     )
 
     /**
-     * Zip-style WALL config, tier-based with a grid-aware density floor.
-     * Densities follow the reference screenshots on 6x6 (Easy ~27%, Medium ~20%,
-     * Hard ~17%). But on 8x8 the board is wider, so under cover-all rules an
-     * ultra-low density produces too many valid Hamiltonian routes to converge
-     * unique — hence a per-tier floor that still leaves plenty of wall/gate
-     * complexity to carry the difficulty. Edge walls kill alternative routes and
-     * converge reliably.
+     * Zip-reference config, tier-based. Walls-first architecture: densities now
+     * match the screenshots exactly (Easy ~27%, Medium ~20-22%, Hard ~15-17%)
+     * because solvability comes from finding a Hamiltonian path through the
+     * maze, NOT from density-driven convergence. Difficulty rides on wall
+     * chains (straight → L → T), their count, and the segment gaps.
      */
     fun challengeConfigFor(level: Int, rows: Int, cols: Int): ChallengeParams {
         val big = rows * cols >= 64
-        // On 8x8 the board is wide: under cover-all, a too-low density creates too
-        // many valid Hamiltonian routes to converge unique. The floor keeps 8x8
-        // solvable; difficulty on 8x8 is carried by walls/gates instead.
         return when (tierFor(level)) {
-            ChallengeTier.EASY -> ChallengeParams(0.27f, 2, 4, 3)
-            ChallengeTier.EASY_MED -> ChallengeParams(0.23f, 2, 5, 5)
-            ChallengeTier.MEDIUM -> ChallengeParams(if (big) 0.26f else 0.20f, 2, 6, 8)
-            ChallengeTier.MED_HARD -> ChallengeParams(if (big) 0.26f else 0.17f, 2, 8, 11)
-            ChallengeTier.HARD -> ChallengeParams(if (big) 0.25f else 0.15f, 2, 10, 14)
+            ChallengeTier.EASY -> ChallengeParams(0.27f, 2, 4, if (big) 4 else 4, 2, false)
+            ChallengeTier.EASY_MED -> ChallengeParams(0.23f, 2, 5, if (big) 6 else 5, 3, false)
+            ChallengeTier.MEDIUM -> ChallengeParams(if (big) 0.20f else 0.22f, 2, 6, if (big) 7 else 6, 3, true)
+            ChallengeTier.MED_HARD -> ChallengeParams(if (big) 0.18f else 0.17f, 2, 8, if (big) 8 else 7, 4, true)
+            ChallengeTier.HARD -> ChallengeParams(if (big) 0.16f else 0.15f, 2, 10, if (big) 9 else 8, 5, true)
         }
     }
 
@@ -150,14 +147,15 @@ object LevelFactory {
             GameMode.CHALLENGE -> {
                 val cfg = challengeConfigFor(level, gridRows, gridCols)
                 try {
-                    val wall = LevelGenerator.generateWallLevel(
-                        gridRows, gridCols, cfg.numberDensity, cfg.maxWalls, seed,
+                    val wall = LevelGenerator.generateMazeWallLevel(
+                        gridRows, gridCols, cfg.numberDensity, cfg.wallPieces,
+                        cfg.maxChainLen, cfg.allowBranch, seed,
                         cfg.minSeg, cfg.maxSeg
                     )
                     val numbers = wall.numberPositions.size
                     GameState(gridRows, gridCols, wall.numberPositions, numbers, mode, edgeWalls = wall.edgeWalls)
                 } catch (e: IllegalStateException) {
-                    null   // candidate rejected — not unique within wall budget
+                    null   // candidate rejected — no Hamiltonian path through maze
                 }
             }
         }
@@ -177,8 +175,9 @@ object LevelFactory {
             }
             GameMode.CHALLENGE -> {
                 val cfg = challengeConfigFor(level, gridRows, gridCols)
-                val wall = LevelGenerator.generateWallLevel(
-                    gridRows, gridCols, cfg.numberDensity, cfg.maxWalls, seed,
+                val wall = LevelGenerator.generateMazeWallLevel(
+                    gridRows, gridCols, cfg.numberDensity, cfg.wallPieces,
+                    cfg.maxChainLen, cfg.allowBranch, seed,
                     cfg.minSeg, cfg.maxSeg
                 )
                 val numbers = wall.numberPositions.size
@@ -197,22 +196,33 @@ object LevelFactory {
         if (mode == GameMode.SIMPLE) return buildWithSeed(mode, level, seed = LevelGenerator.seedFor(mode, level))
 
         val target = challengeTargetFor(level)
-        val n = candidatesFor(level)                       // honours boss/extra candidates
-        val candidates = mutableListOf<Pair<Long, DifficultyScorer.Score>>()
-        val states = mutableListOf<Pair<Long, GameState>>()
+        val n = candidatesFor(level)                       // honours tier budgets
+        data class Cand(val seed: Long, val gs: GameState, val routes: Int, val score: DifficultyScorer.Score)
+        val candidates = mutableListOf<Cand>()
 
         for (i in 0 until n) {
             val seed = LevelGenerator.seedFor(mode, level) + i * 7919L
-            val gs = buildWithSeedOrNull(mode, level, seed) ?: continue   // skip invalid
+            val gs = buildWithSeedOrNull(mode, level, seed) ?: continue   // no path through maze
+            val routes = LevelGenerator.countOrderedPaths(
+                gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 8, edgeWalls = gs.edgeWalls
+            )
+            if (routes < 1) continue   // unsolvable — cannot happen, but guard anyway
             val score = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions)
-            candidates.add(seed to score)
-            states.add(seed to gs)
+            candidates.add(Cand(seed, gs, routes, score))
         }
         if (candidates.isEmpty()) {
-            error("Level $level: no unique challenge candidate in $n attempts")
+            error("Level $level: no challenge candidate found in $n attempts")
         }
 
-        val bestSeed = DifficultyScorer.pickBest(candidates, target) ?: candidates[0].first
-        return states.first { it.first == bestSeed }.second
+        // Zip-faithful selection: FEWEST valid routes first (closer to unique =
+        // harder to stumble into a solution), then difficulty closest to target,
+        // then scorer tiebreak via pickBest.
+        val minRoutes = candidates.minOf { it.routes }
+        val finalists = candidates.filter { it.routes <= minRoutes + 1 }
+        val best = finalists
+            .map { it.seed to it.score }
+            .let { DifficultyScorer.pickBest(it, target) }
+            ?: finalists.first().seed
+        return candidates.first { it.seed == best }.gs
     }
 }

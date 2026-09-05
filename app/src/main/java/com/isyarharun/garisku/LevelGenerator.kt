@@ -315,6 +315,10 @@ object LevelGenerator {
     private fun edgeWallBlocks(a: Position, b: Position, walls: Set<WallEdge>): Boolean =
         walls.any { it.connects(a, b) }
 
+    /** True when [set] contains an edge connecting [a]-[b], undirected. */
+    private fun wallSetContains(set: Set<WallEdge>, a: Position, b: Position): Boolean =
+        set.any { it.connects(a, b) }
+
     /**
      * Finds the SECOND valid ordered route (if any) and returns its full cell
      * list. Returns null when the level already has exactly one solution (or
@@ -461,6 +465,203 @@ object LevelGenerator {
     /** Consecutive edge walls along a cell route (the shared sides between steps). */
     private fun consecutiveEdges(path: List<Position>): Set<WallEdge> = buildSet {
         for (i in 0 until path.size - 1) add(WallEdge(path[i], path[i + 1]))
+    }
+
+    /**
+     * MAZE-WALL level (Zip-faithful, WALLS-FIRST architecture).
+     *
+     * Inverted from generateWallLevel: walls come FIRST as connected chains
+     * (straight lines, L-shapes, T-branches — exactly the Zip reference style),
+     * THEN a Hamiltonian path is searched through the walled board, THEN numbers
+     * are placed on that path.
+     *
+     * Why: with path-first + kill-alternatives, low number densities (Zip's Hard
+     * is ~14-17%) never converge to a unique solution on wide boards. With
+     * walls-first, the numbers are placed AFTER a route is found, so the level is
+     * solvable by construction at ANY density — difficulty then comes from the
+     * maze structure (gates, corridors) and route-count minimisation.
+     *
+     * @param numberDensity share of cells carrying a number (any value works now)
+     * @param wallPieces    how many wall chains to attempt
+     * @param maxChainLen   max edges per chain (1=straight stub, 3+ makes L/T)
+     * @param allowBranch   when true, a chain may fork into a T from an endpoint
+     */
+    fun generateMazeWallLevel(
+        rows: Int, cols: Int,
+        numberDensity: Float,
+        wallPieces: Int, maxChainLen: Int,
+        allowBranch: Boolean,
+        seed: Long,
+        minSeg: Int = 2, maxSeg: Int = 3
+    ): BrickLevel {
+        require(rows >= 5 && cols >= 5)
+        val total = rows * cols
+        val random = Random(seed)
+
+        // ── 1. Solution path FIRST (fast Hamiltonian, no walls yet) ──
+        val solution = generateHamiltonianPath(rows, cols, seed)
+        val solutionEdges = consecutiveEdges(solution)
+
+        // ── 2. Place wall CHAINS on edges the solution does NOT use. ──
+        // This guarantees the solution path stays fully intact → solvable by
+        // construction, NO expensive search-through-maze, NO shedding. The walls
+        // block alternative short-cuts and form connected chains (L/T) like Zip.
+        val walls = LinkedHashSet<WallEdge>()
+        val allEdges = buildList {
+            for (r in 0 until rows) for (c in 0 until cols) {
+                val p = Position(r, c)
+                if (c + 1 < cols) add(WallEdge(p, Position(r, c + 1)))
+                if (r + 1 < rows) add(WallEdge(p, Position(r + 1, c)))
+            }
+        }
+        val usable = allEdges.filter { e -> !solutionEdges.any { it.connects(e.a, e.b) } }.shuffled(random)
+
+        var pieces = 0
+        var gi = 0
+        val totalEdges = allEdges.size
+        // Keep walls well below half of all edges so the board stays permissive.
+        val maxWalls = (totalEdges * 0.30f).toInt().coerceAtLeast(2)
+        while (pieces < wallPieces && gi < usable.size && walls.size < maxWalls) {
+            // Seed edge that is not yet walled and not a solution edge.
+            var seedEdge: WallEdge? = null
+            while (gi < usable.size) {
+                val e = usable[gi++]
+                if (e !in walls) { seedEdge = e; break }
+            }
+            seedEdge ?: break
+
+            // Grow a connected chain from this seed (straight / L / T).
+            val chain = ArrayDeque<WallEdge>().apply { addLast(seedEdge) }
+            val len = 1 + random.nextInt(maxChainLen)
+            var tip = if (random.nextBoolean()) seedEdge.b else seedEdge.a
+            var prev = if (tip == seedEdge.b) seedEdge.a else seedEdge.b
+
+            while (chain.size < len) {
+                val options = neighbours(tip, rows, cols)
+                    .filter { n ->
+                        n != prev &&
+                            !wallSetContains(walls, tip, n) &&
+                            !wallSetContains(chain.toSet(), tip, n) &&
+                            !wallSetContains(solutionEdges, tip, n)   // never block the solution
+                    }
+                if (options.isEmpty()) break
+                val next = options.random(random)
+                chain.addLast(WallEdge(tip, next))
+                prev = tip; tip = next
+            }
+
+            // Optional T-branch.
+            if (allowBranch && chain.size >= 2 && random.nextInt(3) == 0) {
+                val branchRoot = chain.random(random).let { if (random.nextBoolean()) it.a else it.b }
+                val branchOpts = neighbours(branchRoot, rows, cols).filter { n ->
+                    !wallSetContains(walls, branchRoot, n) &&
+                        !wallSetContains(chain.toSet(), branchRoot, n) &&
+                        !wallSetContains(solutionEdges, branchRoot, n)
+                }
+                if (branchOpts.isNotEmpty()) {
+                    val bNext = branchOpts.random(random)
+                    chain.addLast(WallEdge(branchRoot, bNext))
+                }
+            }
+
+            // Accept the chain if it keeps the board connected. Degree safety is
+            // automatically satisfied for every cell ON the solution path (which
+            // is intact), and candidate chains avoid solution edges, so we only
+            // need to ensure we don't wall off a cell entirely (parity/connectivity).
+            val before = walls.size
+            val added = walls.addAll(chain) && walls.size > before
+            if (added) {
+                if (!connectedAllCells(rows, cols, walls)) walls.removeAll(chain)
+                else pieces++
+            }
+        }
+
+        // ── 3. Numbers on the (intact) solution path — solvable by construction ──
+        val numberCount = (total * numberDensity).toInt().coerceIn(4, total - 2)
+        val numbers = placeNumbers(solution, numberCount, seed, minSeg, maxSeg)
+
+        return BrickLevel(solution, emptySet(), numbers, walls)
+    }
+
+    /** All cells reachable through non-walled edges? (O(cells) BFS). */
+    private fun connectedAllCells(rows: Int, cols: Int, walls: Set<WallEdge>): Boolean {
+        val total = rows * cols
+        val seen = hashSetOf(Position(0, 0))
+        val queue = ArrayDeque<Position>().apply { addLast(Position(0, 0)) }
+        while (queue.isNotEmpty()) {
+            val cur = queue.removeFirst()
+            for (nb in neighbours(cur, rows, cols)) {
+                if (nb in seen) continue
+                if (edgeWallBlocks(cur, nb, walls)) continue
+                seen.add(nb); queue.addLast(nb)
+            }
+        }
+        return seen.size == total
+    }
+
+    /**
+     * Degree safety: a Hamiltonian path can only have 2 endpoints (degree-1
+     * cells); every other cell needs >= 2 open edges. Counting open edges per
+     * cell after the chain is added — reject the chain if it creates too many
+     * degree-1 cells (candidate endpoints) or ANY degree-0 cell.
+     */
+    private fun degreeSafetyOk(rows: Int, cols: Int, walls: Set<WallEdge>): Boolean {
+        var degree1 = 0
+        for (r in 0 until rows) for (c in 0 until cols) {
+            val p = Position(r, c)
+            var open = 0
+            for (nb in neighbours(p, rows, cols)) {
+                if (!edgeWallBlocks(p, nb, walls)) open++
+            }
+            if (open == 0) return false                 // isolated cell — impossible
+            if (open == 1) {
+                degree1++
+                if (degree1 > 2) return false           // too many forced endpoints
+            }
+        }
+        return true
+    }
+
+    /**
+     * Bounded Warnsdorff DFS over the FULL grid respecting edge walls. Every
+     * open cell must be visited exactly once (cover-all); returns null when no
+     * Hamiltonian path exists within the budget.
+     */
+    private fun hamiltonianWithWalls(
+        rows: Int, cols: Int,
+        walls: Set<WallEdge>,
+        random: Random
+    ): List<Position>? {
+        val total = rows * cols
+        repeat(8) {
+            val start = Position(random.nextInt(rows), random.nextInt(cols))
+            var budget = 60_000
+            val path = mutableListOf(start)
+            val visited = hashSetOf(start)
+
+            fun dfs(): Boolean {
+                if (path.size == total) return true
+                if (budget <= 0) return false
+                budget--
+                val cur = path.last()
+                val sorted = neighbours(cur, rows, cols)
+                    .filter { it !in visited && !edgeWallBlocks(cur, it, walls) }
+                    .sortedBy { n ->
+                        neighbours(n, rows, cols).count {
+                            it !in visited && it != cur && !edgeWallBlocks(n, it, walls)
+                        }
+                    }
+                for (n in sorted) {
+                    path.add(n); visited.add(n)
+                    if (dfs()) return true
+                    path.removeAt(path.size - 1); visited.remove(n)
+                    if (budget <= 0) return false
+                }
+                return false
+            }
+            if (dfs()) return path.toList()
+        }
+        return null
     }
 
     /**

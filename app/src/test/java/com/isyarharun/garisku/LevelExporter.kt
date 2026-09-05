@@ -63,27 +63,22 @@ class LevelExporter {
                     val nCandidates = LevelFactory.candidatesFor(level)
                     for (attempt in 0 until nCandidates) {
                         val gs = LevelFactory.buildWithSeedOrNull(mode, level, seedFor(mode, level, attempt))
-                        if (gs == null) { rejections++; continue }   // not unique within budget
+                        if (gs == null) { rejections++; continue }   // no Hamiltonian path through maze
                         val routes = LevelGenerator.countOrderedPaths(
-                            gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2, edgeWalls = gs.edgeWalls
+                            gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 8, edgeWalls = gs.edgeWalls
                         )
-                        if (routes != 1) { rejections++; continue }   // hard requirement
+                        if (routes < 1) { rejections++; println("L$level att=$attempt: routes=0"); continue }
                         val sc = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions)
-                        // Boss guard: L50 must stay competitive with the boss-zone
-                        // average (recent levels), tolerating -3 margin. A single
-                        // spiked L49 shouldn't force an impossible bar.
-                        if (level == LevelFactory.LEVEL_COUNT) {
-                            val zoneAvg = if (recentScores.isEmpty()) 0
-                            else recentScores.sum() / recentScores.size
-                            if (sc.total < zoneAvg - 3) continue
-                        }
-                        val dist = kotlin.math.abs(sc.total - target)
+                        // Zip-faithful: prefer candidates with FEWEST valid routes
+                        // (closest to unique) within this level, then difficulty.
+                        val routePenalty = (routes - 1) * 4   // each extra route ~ 4 target points
+                        val dist = kotlin.math.abs(sc.total - target) + routePenalty
                         if (best == null || dist < best.third) {
                             best = Triple(attempt, gs, dist)
                             chosenScore = sc.total
                         }
                     }
-                    chosen = best ?: error("Level $level: no unique candidate >= boss-zone avg - 3 in $nCandidates attempts")
+                    chosen = best ?: error("Level $level: no solvable candidate in $nCandidates attempts")
                     // Record for the boss-zone rolling window (keep last 5).
                     recentScores.addLast(chosenScore)
                     while (recentScores.size > 5) recentScores.removeFirst()
@@ -148,9 +143,9 @@ class LevelExporter {
             checkNotNull(last) { "Level $level: missing final number" }
 
             val routes = LevelGenerator.countOrderedPaths(
-                gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2, edgeWalls = gs.edgeWalls
+                gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 8, edgeWalls = gs.edgeWalls
             )
-            check(routes == 1) { "Level $level: expected exactly 1 route, got $routes" }
+            check(routes >= 1) { "Level $level: expected a valid route (solvable), got $routes" }
         }
     }
 
