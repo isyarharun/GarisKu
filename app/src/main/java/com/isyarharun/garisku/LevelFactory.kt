@@ -26,19 +26,33 @@ object LevelFactory {
     /** Candidates per level in the exporter's calibration loop. */
     const val CANDIDATES_PER_LEVEL = 32
 
-    /** Candidate budget per level. Hard bands get more attempts because lower
-     *  density (more ambiguity) has a higher rejection rate. Boss gets the most. */
-    fun candidatesFor(level: Int): Int = when {
-        level >= 40 -> 64   // NIGHTMARE / BOSS
-        level >= 26 -> 48   // EXTREME
+    /** Difficulty tiers following the Zip pattern (from the reference screenshots):
+     *  Easy = many numbers (guided), Hard = few numbers (ambiguous). Density is
+     *  relative to grid, so Easy-6x6 and Easy-8x8 feel equally "guided".
+     */
+    enum class ChallengeTier { EASY, EASY_MED, MEDIUM, MED_HARD, HARD }
+
+    fun tierFor(level: Int): ChallengeTier = when {
+        level <= 10 -> ChallengeTier.EASY
+        level <= 15 -> ChallengeTier.EASY_MED
+        level <= 25 -> ChallengeTier.MEDIUM
+        level <= 35 -> ChallengeTier.MED_HARD
+        else -> ChallengeTier.HARD
+    }
+
+    /** Candidate budget per tier. Low-density (Hard) bands reject more, so they
+     *  get more attempts to converge a unique solution. */
+    fun candidatesFor(level: Int): Int = when (tierFor(level)) {
+        ChallengeTier.HARD, ChallengeTier.MED_HARD -> 64
+        ChallengeTier.MEDIUM -> 48
         else -> CANDIDATES_PER_LEVEL
     }
 
-    /** Grid size curve — jumps early so difficulty doesn't wait for L25+:
-     *  6x6 learning band, 7x7 medium→hardcore, 8x8 from L16 (very hard → extreme). */
+    /** Grid size follows level progression, staying in 6x6..8x8 (Zip reference).
+     *  Early levels are 6x6, later levels 8x8 — but difficulty tier is
+     *  independent, so a late Hard level can still be 8x8 and vice versa. */
     fun gridSizeFor(level: Int): Pair<Int, Int> = when {
-        level <= 5 -> 6 to 6
-        level <= 15 -> 7 to 7
+        level <= 25 -> 6 to 6
         else -> 8 to 8
     }
 
@@ -70,21 +84,26 @@ object LevelFactory {
     )
 
     /**
-     * Zip-style WALL config. Edge walls reliably converge (they kill alternative
-     * routes directly, unlike inert cell-bricks), so density can drop as low as
-     * 0.28 for the boss without flooding rejects — each dropped number + each
-     * added wall increases decision ambiguity and gate threading.
+     * Zip-style WALL config, tier-based with a grid-aware density floor.
+     * Densities follow the reference screenshots on 6x6 (Easy ~27%, Medium ~20%,
+     * Hard ~17%). But on 8x8 the board is wider, so under cover-all rules an
+     * ultra-low density produces too many valid Hamiltonian routes to converge
+     * unique — hence a per-tier floor that still leaves plenty of wall/gate
+     * complexity to carry the difficulty. Edge walls kill alternative routes and
+     * converge reliably.
      */
-    fun challengeConfigFor(level: Int): ChallengeParams = when {
-        level <= 3 -> ChallengeParams(0.55f, 2, 3, 3)    // learning: guided
-        level <= 5 -> ChallengeParams(0.48f, 2, 4, 3)    // easy+
-        level <= 7 -> ChallengeParams(0.44f, 2, 5, 4)    // medium
-        level <= 9 -> ChallengeParams(0.41f, 2, 6, 5)    // hard
-        level <= 15 -> ChallengeParams(0.38f, 2, 7, 7)   // HARDCORE (L10 breakpoint)
-        level <= 25 -> ChallengeParams(0.36f, 2, 8, 8)   // very hard
-        level <= 39 -> ChallengeParams(0.34f, 2, 9, 10)  // extreme
-        level <= 49 -> ChallengeParams(0.31f, 2, 10, 12) // nightmare
-        else -> ChallengeParams(0.28f, 2, 12, 16)        // BOSS (L50): sparse + most walls
+    fun challengeConfigFor(level: Int, rows: Int, cols: Int): ChallengeParams {
+        val big = rows * cols >= 64
+        // On 8x8 the board is wide: under cover-all, a too-low density creates too
+        // many valid Hamiltonian routes to converge unique. The floor keeps 8x8
+        // solvable; difficulty on 8x8 is carried by walls/gates instead.
+        return when (tierFor(level)) {
+            ChallengeTier.EASY -> ChallengeParams(0.27f, 2, 4, 3)
+            ChallengeTier.EASY_MED -> ChallengeParams(0.23f, 2, 5, 5)
+            ChallengeTier.MEDIUM -> ChallengeParams(if (big) 0.26f else 0.20f, 2, 6, 8)
+            ChallengeTier.MED_HARD -> ChallengeParams(if (big) 0.26f else 0.17f, 2, 8, 11)
+            ChallengeTier.HARD -> ChallengeParams(if (big) 0.25f else 0.15f, 2, 10, 14)
+        }
     }
 
     /**
@@ -129,7 +148,7 @@ object LevelFactory {
                 GameState(gridRows, gridCols, positions, numbers, mode)
             }
             GameMode.CHALLENGE -> {
-                val cfg = challengeConfigFor(level)
+                val cfg = challengeConfigFor(level, gridRows, gridCols)
                 try {
                     val wall = LevelGenerator.generateWallLevel(
                         gridRows, gridCols, cfg.numberDensity, cfg.maxWalls, seed,
@@ -157,7 +176,7 @@ object LevelFactory {
                 GameState(gridRows, gridCols, positions, numbers, mode)
             }
             GameMode.CHALLENGE -> {
-                val cfg = challengeConfigFor(level)
+                val cfg = challengeConfigFor(level, gridRows, gridCols)
                 val wall = LevelGenerator.generateWallLevel(
                     gridRows, gridCols, cfg.numberDensity, cfg.maxWalls, seed,
                     cfg.minSeg, cfg.maxSeg
