@@ -21,8 +21,11 @@ import kotlin.math.ln
  *  - meanDeviationDepth — how long a wrong turn survives before dead-ending
  *    (backtracking / decision depth).
  *  - avgBranching — legal options per step along the solution.
+ *  - gateCount — articulation points (Zip-like choke points) created by edge
+ *    walls; more gates = more route ordering must be threaded correctly.
  *
- * Bricks and number density are generator KNOBS, deliberately NOT score inputs.
+ * Number density, wall count and segment gaps are generator KNOBS, deliberately
+ * NOT raw score inputs (they feed difficulty indirectly through the metrics).
  */
 object DifficultyScorer {
 
@@ -32,32 +35,64 @@ object DifficultyScorer {
         val nearSolutionPrefix: Int,
         val forcedMoveRatio: Float,
         val meanDeviationDepth: Float,
-        val avgBranching: Float
+        val avgBranching: Float,
+        val gateCount: Int
     )
 
     fun score(
         rows: Int,
         cols: Int,
         blocks: Set<Position>,
+        edgeWalls: Set<WallEdge>,
         numbers: Map<Int, Position>
     ): Score {
-        val a = RouteAnalyzer.analyze(rows, cols, numbers, blocks)
+        val a = RouteAnalyzer.analyze(rows, cols, numbers, blocks, edgeWalls)
         val nearF = ln(1f + minOf(a.nearSolutionFull, 256).toFloat()) / ln(257f)
         val nearP = ln(1f + minOf(a.nearSolutionPrefix, 256).toFloat()) / ln(257f)
         val dec = 1f - a.forcedMoveRatio
         val dev = minOf(a.meanDeviationDepth, 20f) / 20f
         val br = ((a.avgBranching - 1.2f) / 0.5f).coerceIn(0f, 1f)
-        val totalScore = 30f * nearF + 20f * nearP + 20f * dec + 20f * dev + 10f * br
+        // Gates are strong but saturate fast; cap at 8 and weight modestly.
+        val gate = (minOf(a.gateCount, 8).toFloat() / 8f)
+        // Near-solution traps are the strongest "needs a hint" signal, but they
+        // thin out at very low density. Deviation depth, branching and gates keep
+        // rising as density drops + walls accumulate, so balancing them in keeps
+        // the high-level curve from dipping.
+        val totalScore =
+            32f * nearF + 24f * nearP +
+                14f * dec + 16f * dev + 8f * br + 6f * gate
         return Score(
             totalScore.toInt().coerceIn(0, 100),
             a.nearSolutionFull, a.nearSolutionPrefix,
-            a.forcedMoveRatio, a.meanDeviationDepth, a.avgBranching
+            a.forcedMoveRatio, a.meanDeviationDepth, a.avgBranching,
+            a.gateCount
         )
     }
 
-    /** Pick the candidate whose score is closest to [target]. */
+    /**
+     * Pick the candidate whose total is closest to [target] (primary criterion —
+     * required), but on a near-tie (within 2 points) prefer the one that is
+     * GENUINELY harder to play: higher deviation depth, higher branching, more
+     * near-solution traps and more gates. This avoids shipping a candidate that
+     * merely scores high on paper yet plays as a forced/guided corridor.
+     */
     fun <T> pickBest(candidates: List<Pair<T, Score>>, target: Int): T? {
         if (candidates.isEmpty()) return null
-        return candidates.minByOrNull { (_, s) -> kotlin.math.abs(s.total - target) }?.first
+        val best = candidates.minWithOrNull { a, b ->
+            val da = kotlin.math.abs(a.second.total - target)
+            val db = kotlin.math.abs(b.second.total - target)
+            when {
+                da != db -> da.compareTo(db)
+                else -> playHardness(a.second).compareTo(playHardness(b.second))
+            }
+        } ?: return null
+        return best.first
     }
+
+    private fun playHardness(s: Score): Float =
+        1f * s.meanDeviationDepth +
+            1.5f * s.avgBranching +
+            (minOf(s.nearSolutionFull, 50).toFloat() / 10f) +
+            (minOf(s.nearSolutionPrefix, 50).toFloat() / 10f) +
+            (0.5f * s.gateCount)
 }

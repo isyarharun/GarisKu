@@ -48,6 +48,11 @@ class LevelExporter {
 
         for (mode in GameMode.entries) {
             val sb = StringBuilder("{")
+            // Rolling window of recent CHALLENGE scores so the boss level (L50)
+            // can be compared against the stable boss-zone average, not a single
+            // possibly-anomalous predecessor (L49 sometimes spikes to ~87 while
+            // L45-48 sit at 69-79).
+            val recentScores = ArrayDeque<Int>()
             for (level in 1..LevelFactory.LEVEL_COUNT) {
                 val chosen: Triple<Int, GameState, Int>   // attempt, state, dist
                 var chosenScore = 0
@@ -55,26 +60,38 @@ class LevelExporter {
                     val target = LevelFactory.challengeTargetFor(level)
                     var best: Triple<Int, GameState, Int>? = null
                     var rejections = 0
-                    for (attempt in 0 until LevelFactory.CANDIDATES_PER_LEVEL) {
+                    val nCandidates = LevelFactory.candidatesFor(level)
+                    for (attempt in 0 until nCandidates) {
                         val gs = LevelFactory.buildWithSeedOrNull(mode, level, seedFor(mode, level, attempt))
                         if (gs == null) { rejections++; continue }   // not unique within budget
                         val routes = LevelGenerator.countOrderedPaths(
-                            gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2
+                            gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2, edgeWalls = gs.edgeWalls
                         )
                         if (routes != 1) { rejections++; continue }   // hard requirement
-                        val sc = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.numberPositions)
+                        val sc = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions)
+                        // Boss guard: L50 must stay competitive with the boss-zone
+                        // average (recent levels), tolerating -3 margin. A single
+                        // spiked L49 shouldn't force an impossible bar.
+                        if (level == LevelFactory.LEVEL_COUNT) {
+                            val zoneAvg = if (recentScores.isEmpty()) 0
+                            else recentScores.sum() / recentScores.size
+                            if (sc.total < zoneAvg - 3) continue
+                        }
                         val dist = kotlin.math.abs(sc.total - target)
                         if (best == null || dist < best.third) {
                             best = Triple(attempt, gs, dist)
                             chosenScore = sc.total
                         }
                     }
-                    chosen = best ?: error("Level $level: no unique candidate in ${LevelFactory.CANDIDATES_PER_LEVEL} attempts")
+                    chosen = best ?: error("Level $level: no unique candidate >= boss-zone avg - 3 in $nCandidates attempts")
+                    // Record for the boss-zone rolling window (keep last 5).
+                    recentScores.addLast(chosenScore)
+                    while (recentScores.size > 5) recentScores.removeFirst()
 
                     val gs = chosen.second
                     val open = allOpen(gs)
                     val density = gs.totalNumbers.toFloat() / open.size
-                    val ana = RouteAnalyzer.analyze(gs.rows, gs.cols, gs.numberPositions, gs.blocks)
+                    val ana = RouteAnalyzer.analyze(gs.rows, gs.cols, gs.numberPositions, gs.blocks, gs.edgeWalls)
                     val (gm, _) = gapStats(ana.solutionRoute, gs.numberPositions)
                     table.appendLine(
                         ("%3d | %dx%d | %4d | %.2f | %4.2f | %6d | %4d | %.2f | %5.1f | %5d | %5d | %4.1f | %5d | %3d | %3d").format(
@@ -101,6 +118,10 @@ class LevelExporter {
                 })
                 sb.append("},\"blocks\":[")
                 sb.append(gs.blocks.joinToString(",") { "[${it.row},${it.col}]" })
+                sb.append("],\"walls\":[")
+                sb.append(gs.edgeWalls.joinToString(",") {
+                    "[${it.a.row},${it.a.col},${it.b.row},${it.b.col}]"
+                })
                 sb.append("]}")
             }
             sb.append("}")
@@ -126,7 +147,9 @@ class LevelExporter {
             checkNotNull(first) { "Level $level: missing number 1" }
             checkNotNull(last) { "Level $level: missing final number" }
 
-            val routes = LevelGenerator.countOrderedPaths(gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2)
+            val routes = LevelGenerator.countOrderedPaths(
+                gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2, edgeWalls = gs.edgeWalls
+            )
             check(routes == 1) { "Level $level: expected exactly 1 route, got $routes" }
         }
     }

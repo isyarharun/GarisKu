@@ -261,7 +261,8 @@ object LevelGenerator {
         rows: Int, cols: Int,
         numbers: Map<Int, Position>,
         blocks: Set<Position>,
-        stopAfter: Int = 2
+        stopAfter: Int = 2,
+        edgeWalls: Set<WallEdge> = emptySet()
     ): Int {
         val total = rows * cols - blocks.size
         if (total <= 0) return 0
@@ -291,6 +292,7 @@ object LevelGenerator {
 
             for (nb in neighbours(cur, rows, cols)) {
                 if (nb in blocks || nb in visited) continue
+                if (edgeWallBlocks(cur, nb, edgeWalls)) continue
                 val isNumber = numberAt[nb]
                 if (isNumber != null) {
                     if (isNumber != nextNumber) continue   // wrong number = blocked
@@ -310,6 +312,9 @@ object LevelGenerator {
         return count
     }
 
+    private fun edgeWallBlocks(a: Position, b: Position, walls: Set<WallEdge>): Boolean =
+        walls.any { it.connects(a, b) }
+
     /**
      * Finds the SECOND valid ordered route (if any) and returns its full cell
      * list. Returns null when the level already has exactly one solution (or
@@ -321,7 +326,8 @@ object LevelGenerator {
     fun findSecondRoute(
         rows: Int, cols: Int,
         numbers: Map<Int, Position>,
-        blocks: Set<Position>
+        blocks: Set<Position>,
+        edgeWalls: Set<WallEdge> = emptySet()
     ): List<Position>? {
         val total = rows * cols - blocks.size
         if (total <= 0) return null
@@ -357,6 +363,7 @@ object LevelGenerator {
 
             for (nb in neighbours(cur, rows, cols)) {
                 if (nb in blocks || nb in visited) continue
+                if (edgeWallBlocks(cur, nb, edgeWalls)) continue
                 val isNumber = numberAt[nb]
                 current.addLast(nb); visited.add(nb)
                 if (isNumber != null) {
@@ -373,6 +380,87 @@ object LevelGenerator {
 
         dfs(start, 2, 1)
         return secondRoute
+    }
+
+    /**
+     * WALL level (Zip-style) — edges between adjacent cells are walled off to
+     * KILL alternative routes, carving the full-coverage board down to a single
+     * forced journey.
+     *
+     * Unlike cell-bricks (which were inert in this full-coverage generator because
+     * the solution path occupies every open cell), an EDGE wall is placed on an
+     * edge the solution does NOT use. Any alternative route that crossed that
+     * edge is eliminated while the true solution stays fully intact (we never
+     * wall a solution edge). This is O(reliably convergent) and the walls become
+     * real Zip-like gates/corridors the player must thread in the right order.
+     *
+     * @param numberDensity share of cells carrying a number (lower = more ambiguous)
+     * @param maxWalls      hard cap on placed edge walls
+     * @param minSeg,maxSeg segment length between consecutive numbers along the solution
+     */
+    fun generateWallLevel(
+        rows: Int, cols: Int,
+        numberDensity: Float,
+        maxWalls: Int, seed: Long,
+        minSeg: Int = 2, maxSeg: Int = 3
+    ): BrickLevel {
+        require(rows >= 5 && cols >= 5)
+        val total = rows * cols
+        val random = Random(seed)
+
+        // 1. Solution path on a fully open board.
+        val solution = generateHamiltonianPath(rows, cols, seed)
+        val solutionEdges = consecutiveEdges(solution)
+
+        // 2. Numbers on the solution (dense, as preferred).
+        val numberCount = (total * numberDensity).toInt().coerceIn(4, total - 2)
+        var numbers = placeNumbers(solution, numberCount, seed, minSeg, maxSeg)
+
+        val walls = mutableSetOf<WallEdge>()
+        val cr = rows / 2f
+        val cc = cols / 2f
+
+        // 3. Iteratively wall off alternative routes.
+        var iterations = 0
+        while (iterations < 24 && walls.size < maxWalls) {
+            iterations++
+            val routes = countOrderedPaths(rows, cols, numbers, emptySet(), stopAfter = 2, edgeWalls = walls)
+            if (routes == 1) {
+                // Unique — solution path intact, ends on last number.
+                return BrickLevel(solution, emptySet(), numbers, walls)
+            }
+
+            val alt = findSecondRoute(rows, cols, numbers, emptySet(), walls) ?: break
+            val altEdges = consecutiveEdges(alt)
+            // Edges the alternative uses that the true solution does NOT.
+            val candidates = (altEdges - solutionEdges).filter { it !in walls }
+            if (candidates.isEmpty()) {
+                // Alternative shares every edge with the solution (same route in a
+                // different order is impossible for distinct edge walks) — reshuffle
+                // the number placement and retry from a clean wall set.
+                numbers = placeNumbers(solution, numberCount, seed + iterations * 104729L, minSeg, maxSeg)
+                walls.clear()
+                continue
+            }
+            // Wall the deviation edge closest to the board centre (kills most alts).
+            val picked = candidates.minByOrNull { w ->
+                ((w.a.row + w.b.row) / 2f - cr) * ((w.a.row + w.b.row) / 2f - cr) +
+                    ((w.a.col + w.b.col) / 2f - cc) * ((w.a.col + w.b.col) / 2f - cc)
+            }!!
+            walls.add(picked)
+        }
+
+        // Not converged within budget — accept if unique, else reject.
+        val finalRoutes = countOrderedPaths(rows, cols, numbers, emptySet(), stopAfter = 2, edgeWalls = walls)
+        if (finalRoutes == 1) {
+            return BrickLevel(solution, emptySet(), numbers, walls)
+        }
+        error("generateWallLevel: failed to converge to a unique solution (maxWalls=$maxWalls)")
+    }
+
+    /** Consecutive edge walls along a cell route (the shared sides between steps). */
+    private fun consecutiveEdges(path: List<Position>): Set<WallEdge> = buildSet {
+        for (i in 0 until path.size - 1) add(WallEdge(path[i], path[i + 1]))
     }
 
     /**
@@ -578,5 +666,6 @@ object LevelGenerator {
 data class BrickLevel(
     val path: List<Position>,
     val blocks: Set<Position>,
-    val numberPositions: Map<Int, Position>
+    val numberPositions: Map<Int, Position>,
+    val edgeWalls: Set<WallEdge> = emptySet()
 )

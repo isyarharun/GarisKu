@@ -7,7 +7,8 @@ data class LevelData(
     val rows: Int,
     val cols: Int,
     val numberPositions: Map<Int, Position>,
-    val blocks: Set<Position>
+    val blocks: Set<Position>,
+    val edgeWalls: Set<WallEdge> = emptySet()
 )
 
 /**
@@ -37,7 +38,15 @@ object LevelRepository {
                     val p = b.getJSONArray(i)
                     blocks.add(Position(p.getInt(0), p.getInt(1)))
                 }
-                levels[key.toInt()] = LevelData(o.getInt("rows"), o.getInt("cols"), numbers, blocks)
+                val walls = mutableSetOf<WallEdge>()
+                if (o.has("walls")) {
+                    val w = o.getJSONArray("walls")
+                    for (i in 0 until w.length()) {
+                        val e = w.getJSONArray(i)
+                        walls.add(WallEdge(Position(e.getInt(0), e.getInt(1)), Position(e.getInt(2), e.getInt(3))))
+                    }
+                }
+                levels[key.toInt()] = LevelData(o.getInt("rows"), o.getInt("cols"), numbers, blocks, walls)
             }
             cache[mode] = levels
         }

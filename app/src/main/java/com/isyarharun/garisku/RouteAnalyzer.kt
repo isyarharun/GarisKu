@@ -37,6 +37,8 @@ object RouteAnalyzer {
         val nearSolutionFull: Int,
         /** Dead-ends reached with >= 60% of numbers already consumed. */
         val nearSolutionPrefix: Int,
+        /** Zip-like choke points (articulation points) in the open-cell graph. */
+        val gateCount: Int,
         /** True when the exploration budget ran out (counts are samples). */
         val exploreBudgetExhausted: Boolean,
         /** One valid route (deterministic). Empty when no route exists. */
@@ -52,7 +54,8 @@ object RouteAnalyzer {
     fun analyze(
         rows: Int, cols: Int,
         numbers: Map<Int, Position>,
-        blocks: Set<Position>
+        blocks: Set<Position>,
+        edgeWalls: Set<WallEdge> = emptySet()
     ): Analysis {
         val total = rows * cols - blocks.size
         val maxNumber = numbers.keys.maxOrNull() ?: return empty()
@@ -62,8 +65,11 @@ object RouteAnalyzer {
         val numberAt = HashMap<Position, Int>()
         for ((num, p) in numbers) numberAt[p] = num
 
+        fun canCross(a: Position, b: Position): Boolean =
+            !edgeWalls.any { it.connects(a, b) }
+
         // ── 1. Reconstruct ONE valid solution (deterministic DFS order) ──
-        val solution = findRoute(rows, cols, numberAt, blocks, total, maxNumber, start, end)
+        val solution = findRoute(rows, cols, numberAt, blocks, total, maxNumber, start, end, edgeWalls)
             ?: return empty(numbers.size)
 
         // ── 2. Solution walk: branching + forced moves + wrong turns ──
@@ -82,6 +88,7 @@ object RouteAnalyzer {
             var options = 0
             for (nb in neighbours(cur, rows, cols)) {
                 if (nb in blocks) continue
+                if (!canCross(cur, nb)) continue
                 val vi = posIdx[nb]
                 if (vi != null && vi <= j) continue               // already visited
                 val num = numberAt[nb]
@@ -95,6 +102,9 @@ object RouteAnalyzer {
             if (options > maxB) maxB = options
         }
 
+        // ── 2b. Gate count = articulation points of the open-cell graph ──
+        val gateCount = countArticulationPoints(rows, cols, blocks, edgeWalls)
+
         // ── 3. Deviation probes: how long does a wrong turn survive? ──
         val sampled = if (wrongTurns.size <= MAX_PROBES) wrongTurns else {
             val out = ArrayList<Pair<Int, Position>>(MAX_PROBES)
@@ -105,7 +115,7 @@ object RouteAnalyzer {
         var depthMax = 0
         for ((j, cell) in sampled) {
             val baseVisited = HashSet<Position>().apply { for (i in 0..j) add(solution[i]) }
-            val d = probeDepth(rows, cols, numberAt, blocks, maxNumber, cell, baseVisited, expectedAt[j])
+            val d = probeDepth(rows, cols, numberAt, blocks, maxNumber, cell, baseVisited, expectedAt[j], edgeWalls)
             depthSum += d
             if (d > depthMax) depthMax = d
         }
@@ -133,6 +143,7 @@ object RouteAnalyzer {
             var moves = 0
             for (nb in nbs) {
                 if (nb in blocks || nb in visited) continue
+                if (!canCross(cur, nb)) continue
                 val num = numberAt[nb]
                 if (num != null && num != nextNumber) continue
                 moves++
@@ -144,6 +155,7 @@ object RouteAnalyzer {
             for (nb in nbs) {
                 if (exhausted) return
                 if (nb in blocks || nb in visited) continue
+                if (!canCross(cur, nb)) continue
                 val num = numberAt[nb]
                 if (num != null && num != nextNumber) continue
                 visited.add(nb)
@@ -165,6 +177,7 @@ object RouteAnalyzer {
             nearSolutionFull = nearFull,
             nearSolutionPrefix = nearPrefix,
             exploreBudgetExhausted = exhausted,
+            gateCount = gateCount,
             solutionRoute = solution
         )
     }
@@ -177,7 +190,8 @@ object RouteAnalyzer {
         maxNumber: Int,
         startCell: Position,
         baseVisited: Set<Position>,
-        startNext: Int
+        startNext: Int,
+        edgeWalls: Set<WallEdge> = emptySet()
     ): Int {
         var best = 0
         var budget = PROBE_BUDGET
@@ -193,6 +207,7 @@ object RouteAnalyzer {
             for (nb in neighbours(cur, rows, cols)) {
                 if (budget <= 0) return
                 if (nb in blocks || nb in visited) continue
+                if (edgeWalls.any { it.connects(cur, nb) }) continue
                 val num = numberAt[nb]
                 if (num != null && num != nextNumber) continue
                 visited.add(nb)
@@ -210,7 +225,8 @@ object RouteAnalyzer {
         numberAt: Map<Position, Int>,
         blocks: Set<Position>,
         total: Int, maxNumber: Int,
-        start: Position, end: Position
+        start: Position, end: Position,
+        edgeWalls: Set<WallEdge> = emptySet()
     ): List<Position>? {
         var route: List<Position>? = null
         var budget = 300_000
@@ -227,6 +243,7 @@ object RouteAnalyzer {
             for (nb in neighbours(cur, rows, cols)) {
                 if (route != null || budget <= 0) return
                 if (nb in blocks || nb in visited) continue
+                if (edgeWalls.any { it.connects(cur, nb) }) continue
                 val num = numberAt[nb]
                 if (num != null && num != nextNumber) continue
                 stack.addLast(nb); visited.add(nb)
@@ -238,8 +255,63 @@ object RouteAnalyzer {
         return route
     }
 
+    /**
+     * Counts articulation points (gates) of the open-cell graph after edge walls.
+     * A gate is a cell whose removal disconnects the graph — in Zip-style puzzles
+     * these are choke points the player MUST thread in the right order, a strong
+     * "feels hard" signal. Tarjan's algorithm, O(V+E), deterministic.
+     */
+    private fun countArticulationPoints(
+        rows: Int, cols: Int,
+        blocks: Set<Position>,
+        edgeWalls: Set<WallEdge>
+    ): Int {
+        val nodes = buildList {
+            for (r in 0 until rows) for (c in 0 until cols) {
+                val p = Position(r, c)
+                if (p !in blocks) add(p)
+            }
+        }
+        if (nodes.size < 3) return 0
+        val nodeSet = nodes.toSet()
+        val idx = HashMap<Position, Int>(); nodes.forEachIndexed { i, p -> idx[p] = i }
+        val adj = Array(nodes.size) { ArrayList<Int>() }
+        for (p in nodes) {
+            val i = idx[p]!!
+            for (nb in neighbours(p, rows, cols)) {
+                if (nb !in nodeSet) continue
+                if (edgeWalls.any { it.connects(p, nb) }) continue
+                val j = idx[nb]!!
+                if (i < j) { adj[i].add(j); adj[j].add(i) }
+            }
+        }
+        val disc = IntArray(nodes.size) { -1 }
+        val low = IntArray(nodes.size)
+        val isArt = BooleanArray(nodes.size)
+        var time = 0
+
+        fun dfs(u: Int, parent: Int): Unit {
+            disc[u] = time; low[u] = time; time++
+            var children = 0
+            for (v in adj[u]) {
+                if (v == parent) continue
+                if (disc[v] == -1) {
+                    children++
+                    dfs(v, u)
+                    low[u] = minOf(low[u], low[v])
+                    if (parent == -1 && children > 1) isArt[u] = true
+                    if (parent != -1 && low[v] >= disc[u]) isArt[u] = true
+                } else {
+                    low[u] = minOf(low[u], disc[v])
+                }
+            }
+        }
+        for (s in 0 until nodes.size) if (disc[s] == -1) dfs(s, -1)
+        return isArt.count { it }
+    }
+
     private fun empty(numberCount: Int = 0) = Analysis(
-        0, numberCount, 0f, 0, 0f, 0f, 0, 0, 0, 0, false
+        0, numberCount, 0f, 0, 0f, 0f, 0, 0, 0, 0, 0, false
     )
 
     private fun neighbours(p: Position, rows: Int, cols: Int): List<Position> = listOf(

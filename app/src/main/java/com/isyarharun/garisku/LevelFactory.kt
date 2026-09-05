@@ -26,6 +26,14 @@ object LevelFactory {
     /** Candidates per level in the exporter's calibration loop. */
     const val CANDIDATES_PER_LEVEL = 32
 
+    /** Candidate budget per level. Hard bands get more attempts because lower
+     *  density (more ambiguity) has a higher rejection rate. Boss gets the most. */
+    fun candidatesFor(level: Int): Int = when {
+        level >= 40 -> 64   // NIGHTMARE / BOSS
+        level >= 26 -> 48   // EXTREME
+        else -> CANDIDATES_PER_LEVEL
+    }
+
     /** Grid size curve — jumps early so difficulty doesn't wait for L25+:
      *  6x6 learning band, 7x7 medium→hardcore, 8x8 from L16 (very hard → extreme). */
     fun gridSizeFor(level: Int): Pair<Int, Int> = when {
@@ -55,20 +63,28 @@ object LevelFactory {
      *  - L10 breakpoint: density 0.42→0.38 + variance 2..5 = HARDCORE jump.
      */
     data class ChallengeParams(
-        val numberDensity: Float,
+        val numberDensity: Float,   // lower = more decision ambiguity
         val minSeg: Int,
-        val maxSeg: Int,
-        val maxBricks: Int
+        val maxSeg: Int,            // higher = longer blind stretches
+        val maxWalls: Int           // Zip-style edge walls (kill alternative routes)
     )
 
+    /**
+     * Zip-style WALL config. Edge walls reliably converge (they kill alternative
+     * routes directly, unlike inert cell-bricks), so density can drop as low as
+     * 0.28 for the boss without flooding rejects — each dropped number + each
+     * added wall increases decision ambiguity and gate threading.
+     */
     fun challengeConfigFor(level: Int): ChallengeParams = when {
-        level <= 3 -> ChallengeParams(0.55f, 2, 3, 3)   // learning: guided
-        level <= 5 -> ChallengeParams(0.50f, 2, 3, 3)   // easy+
-        level <= 7 -> ChallengeParams(0.46f, 2, 4, 3)   // medium
-        level <= 9 -> ChallengeParams(0.42f, 2, 4, 3)   // hard
-        level <= 15 -> ChallengeParams(0.38f, 2, 5, 3)  // HARDCORE breakpoint (L10)
-        level <= 35 -> ChallengeParams(0.40f, 2, 5, 3)  // very hard
-        else -> ChallengeParams(0.38f, 2, 5, 3)         // extreme
+        level <= 3 -> ChallengeParams(0.55f, 2, 3, 3)    // learning: guided
+        level <= 5 -> ChallengeParams(0.48f, 2, 4, 3)    // easy+
+        level <= 7 -> ChallengeParams(0.44f, 2, 5, 4)    // medium
+        level <= 9 -> ChallengeParams(0.41f, 2, 6, 5)    // hard
+        level <= 15 -> ChallengeParams(0.38f, 2, 7, 7)   // HARDCORE (L10 breakpoint)
+        level <= 25 -> ChallengeParams(0.36f, 2, 8, 8)   // very hard
+        level <= 39 -> ChallengeParams(0.34f, 2, 9, 10)  // extreme
+        level <= 49 -> ChallengeParams(0.31f, 2, 10, 12) // nightmare
+        else -> ChallengeParams(0.28f, 2, 12, 16)        // BOSS (L50): sparse + most walls
     }
 
     /**
@@ -84,9 +100,8 @@ object LevelFactory {
     fun challengeTargetFor(level: Int): Int {
         val anchors = listOf(
             1 to 15, 3 to 18, 5 to 26, 7 to 36, 9 to 50,
-            10 to 64,                       // the breakpoint jump
-            11 to 60, 13 to 58, 15 to 58,   // hardcore plateau
-            20 to 60, 30 to 62, 40 to 65, 50 to 68
+            10 to 64, 15 to 64,               // HARDCORE jump, plateau
+            20 to 70, 30 to 78, 40 to 84, 45 to 89, 50 to 94
         )
         if (level <= anchors.first().first) return anchors.first().second
         for (i in 0 until anchors.size - 1) {
@@ -116,14 +131,14 @@ object LevelFactory {
             GameMode.CHALLENGE -> {
                 val cfg = challengeConfigFor(level)
                 try {
-                    val brick = LevelGenerator.generateBlockingLevel(
-                        gridRows, gridCols, cfg.numberDensity, cfg.maxBricks, seed,
+                    val wall = LevelGenerator.generateWallLevel(
+                        gridRows, gridCols, cfg.numberDensity, cfg.maxWalls, seed,
                         cfg.minSeg, cfg.maxSeg
                     )
-                    val numbers = brick.numberPositions.size
-                    GameState(gridRows, gridCols, brick.numberPositions, numbers, mode, brick.blocks)
+                    val numbers = wall.numberPositions.size
+                    GameState(gridRows, gridCols, wall.numberPositions, numbers, mode, edgeWalls = wall.edgeWalls)
                 } catch (e: IllegalStateException) {
-                    null   // candidate rejected — not unique within brick budget
+                    null   // candidate rejected — not unique within wall budget
                 }
             }
         }
@@ -143,12 +158,12 @@ object LevelFactory {
             }
             GameMode.CHALLENGE -> {
                 val cfg = challengeConfigFor(level)
-                val brick = LevelGenerator.generateBlockingLevel(
-                    gridRows, gridCols, cfg.numberDensity, cfg.maxBricks, seed,
+                val wall = LevelGenerator.generateWallLevel(
+                    gridRows, gridCols, cfg.numberDensity, cfg.maxWalls, seed,
                     cfg.minSeg, cfg.maxSeg
                 )
-                val numbers = brick.numberPositions.size
-                GameState(gridRows, gridCols, brick.numberPositions, numbers, mode, brick.blocks)
+                val numbers = wall.numberPositions.size
+                GameState(gridRows, gridCols, wall.numberPositions, numbers, mode, edgeWalls = wall.edgeWalls)
             }
         }
     }
@@ -163,16 +178,19 @@ object LevelFactory {
         if (mode == GameMode.SIMPLE) return buildWithSeed(mode, level, seed = LevelGenerator.seedFor(mode, level))
 
         val target = challengeTargetFor(level)
-        val n = CANDIDATES_PER_LEVEL
+        val n = candidatesFor(level)                       // honours boss/extra candidates
         val candidates = mutableListOf<Pair<Long, DifficultyScorer.Score>>()
         val states = mutableListOf<Pair<Long, GameState>>()
 
         for (i in 0 until n) {
             val seed = LevelGenerator.seedFor(mode, level) + i * 7919L
-            val gs = buildWithSeed(mode, level, seed)
-            val score = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.numberPositions)
+            val gs = buildWithSeedOrNull(mode, level, seed) ?: continue   // skip invalid
+            val score = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions)
             candidates.add(seed to score)
             states.add(seed to gs)
+        }
+        if (candidates.isEmpty()) {
+            error("Level $level: no unique challenge candidate in $n attempts")
         }
 
         val bestSeed = DifficultyScorer.pickBest(candidates, target) ?: candidates[0].first

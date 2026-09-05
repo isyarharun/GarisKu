@@ -36,6 +36,7 @@ private val LineColor = GreenPrimary         // #65C32F (hijau garis)
 private val TargetRing = OrangeSecondary     // #F57C00 (oranye pulsing)
 private val WinOverlay = GreenSuccess.copy(alpha = 0.55f) // #4CAF50
 private val BrickColor = Color(0xFF37474F)   // bata abu-abu biru (blocked cell)
+private val WallColor = Color.White   // Zip-style edge wall (thin white bar)
 
 private fun buildLevel(mode: GameMode, levelNumber: Int): GameState {
     // Levels are pre-generated data (assets) → instant load, no runtime DFS.
@@ -45,6 +46,7 @@ private fun buildLevel(mode: GameMode, levelNumber: Int): GameState {
         return GameState(
             data.rows, data.cols, data.numberPositions,
             data.numberPositions.size, mode, data.blocks,
+            edgeWalls = data.edgeWalls,
             initialElapsedSeconds = elapsed
         )
     }
@@ -52,6 +54,7 @@ private fun buildLevel(mode: GameMode, levelNumber: Int): GameState {
     val gs = LevelFactory.build(mode, levelNumber)
     return GameState(
         gs.rows, gs.cols, gs.numberPositions, gs.totalNumbers, mode, gs.blocks,
+        edgeWalls = gs.edgeWalls,
         initialElapsedSeconds = elapsed
     )
 }
@@ -366,6 +369,22 @@ private fun GameGrid(
                         style = Stroke(width = 3f)
                     )
                 }
+            }
+        }
+
+        // ── 2b. Edge walls (Zip-style bars on cell boundaries) ──
+        val wallW = (cellSizePx * 0.22f).coerceIn(7f, 16f)
+        for (wall in gameState.edgeWalls) {
+            val a = wall.a
+            val b = wall.b
+            if (a.row == b.row) {
+                // Same row → wall sits on the vertical boundary between two columns.
+                val x = maxOf(a.col, b.col) * cellSizePx - wallW / 2f
+                drawRect(WallColor, Offset(x, a.row * cellSizePx), Size(wallW, cellSizePx))
+            } else {
+                // Same column → wall sits on the horizontal boundary between two rows.
+                val y = maxOf(a.row, b.row) * cellSizePx - wallW / 2f
+                drawRect(WallColor, Offset(a.col * cellSizePx, y), Size(cellSizePx, wallW))
             }
         }
 

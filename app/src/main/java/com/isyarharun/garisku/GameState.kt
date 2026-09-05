@@ -16,6 +16,17 @@ data class Position(val row: Int, val col: Int) {
     }
 }
 
+/**
+ * An edge between two orthogonally-adjacent cells that cannot be crossed
+ * (Zip-style wall). Blocks movement across that shared side while both cells
+ * remain open.
+ */
+data class WallEdge(val a: Position, val b: Position) {
+    init { require(a.isAdjacentTo(b)) }
+    fun connects(x: Position, y: Position): Boolean =
+        (a == x && b == y) || (a == y && b == x)
+}
+
 data class Cell(
     val number: Int? = null,
     val isVisited: Boolean = false
@@ -38,6 +49,8 @@ class GameState(
     val mode: GameMode = GameMode.SIMPLE,
     /** Brick cells that block the path (challenge mode). */
     val blocks: Set<Position> = emptySet(),
+    /** Zip-style edge walls that block crossing between two adjacent cells. */
+    val edgeWalls: Set<WallEdge> = emptySet(),
     /** Cumulative elapsed seconds carried over from previous attempts. */
     initialElapsedSeconds: Int = 0
 ) {
@@ -104,6 +117,8 @@ class GameState(
 
         val lastPos = path.last()
         if (!pos.isAdjacentTo(lastPos)) return false
+        // Edge wall (Zip-style) blocks crossing between these two cells.
+        if (edgeWalls.any { it.connects(lastPos, pos) }) return false
 
         if (number != null && number != nextNumber) {
             triggerError()
