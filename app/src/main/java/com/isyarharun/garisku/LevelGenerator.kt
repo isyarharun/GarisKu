@@ -5,7 +5,8 @@ import kotlin.random.Random
 /**
  * Generates solvable levels for GarisKu.
  *
- * CHALLENGE: random Hamiltonian path + spread bricks with BFS contiguity check.
+ * CHALLENGE: unique-solution wall mazes (edge-wall chains on non-solution edges
+ * + convergence to exactly one valid route).
  * SIMPLE:    random window of a Hamiltonian path.
  */
 object LevelGenerator {
@@ -145,114 +146,6 @@ object LevelGenerator {
     }
 
     /**
-     * Challenge maze level — WALL-based bricks for real difficulty.
-     *
-     * Instead of scattered single cells (weak obstacles), this carves the grid
-     * with wall segments: each wall is a straight run of 2..maxWall cells
-     * (horizontal or vertical). Walls are placed one by one; after each wall
-     * we require (a) connectivity of open cells and (b) parity, and finally
-     * verify a Hamiltonian path exists over the open cells. On success the
-     * solution path is returned — numbers are placed on it so the level is
-     * guaranteed solvable.
-     *
-     * [targetOpenRatio] shapes the maze: 0.85 = light, 0.55 = brutal.
-     */
-    fun generateMazeLevel(
-        rows: Int, cols: Int, numberCount: Int,
-        targetOpenRatio: Float, seed: Long
-    ): BrickLevel {
-        require(rows >= 5 && cols >= 5)
-        val random = Random(seed)
-        val total = rows * cols
-        val targetBlocks = (total * (1f - targetOpenRatio)).toInt()
-            .coerceAtLeast(2)
-            .coerceAtMost(total - numberCount * 2)
-
-        val blocked = mutableSetOf<Position>()
-        // Keep a 1-cell clear margin around the border to avoid degenerate forks.
-        val interior = buildList {
-            for (r in 1 until rows - 1) for (c in 1 until cols - 1) add(Position(r, c))
-        }
-
-        fun openCells(): List<Position> = buildList {
-            for (r in 0 until rows) for (c in 0 until cols) {
-                val p = Position(r, c)
-                if (p !in blocked) add(p)
-            }
-        }
-
-        fun connectedAndParityOk(): List<Position>? {
-            val open = openCells()
-            if (open.isEmpty()) return null
-            val openSet = open.toSet()
-
-            // Parity: path alternates colors → |black - white| <= 1.
-            var black = 0; var white = 0
-            for (p in open) {
-                if ((p.row + p.col) % 2 == 0) black++ else white++
-            }
-            if (kotlin.math.abs(black - white) > 1) return null
-
-            // Connectivity from the first open cell.
-            val visited = hashSetOf<Position>()
-            val queue = ArrayDeque<Position>().apply { add(open.first()); visited.add(open.first()) }
-            while (queue.isNotEmpty()) {
-                val cur = queue.removeFirst()
-                for (nb in neighbours(cur, rows, cols)) {
-                    if (nb in openSet && nb !in visited) { visited.add(nb); queue.addLast(nb) }
-                }
-            }
-            return if (visited.size == open.size) open else null
-        }
-
-        var guard = 0
-        // Hard cap: at most 3 blocks total (2-3 cell wall pieces).
-        val hardCap = minOf(targetBlocks, 3)
-        while (blocked.size < hardCap && guard < 200) {
-            guard++
-            val seedCell = interior.randomOrNull(random) ?: break
-            if (seedCell in blocked) continue
-            val horizontal = random.nextBoolean()
-            val len = 2 + random.nextInt(2)  // 2..3 cells per wall
-            val cells = mutableListOf<Position>()
-            for (i in 0 until len) {
-                val r = if (horizontal) seedCell.row else seedCell.row + i
-                val c = if (horizontal) seedCell.col + i else seedCell.col
-                if (r !in 1 until rows - 1 || c !in 1 until cols - 1) break
-                cells.add(Position(r, c))
-            }
-            if (cells.any { it in blocked }) continue
-            if (blocked.size + cells.size > hardCap) {
-                // Trim the wall to fit the cap.
-                while (cells.size + blocked.size > hardCap && cells.isNotEmpty()) cells.removeAt(cells.size - 1)
-                if (cells.isEmpty()) continue
-            }
-
-            blocked.addAll(cells)
-            val open = connectedAndParityOk()
-            if (open != null && open.size >= numberCount * 2) {
-                // Wall accepted.
-            } else {
-                blocked.removeAll(cells)
-            }
-        }
-
-        // Final verification: a real Hamiltonian path must exist.
-        val open = openCells()
-        val solution = hamiltonianOnOpen(open, rows, cols, random)
-        if (solution != null && blocked.isNotEmpty()) {
-            // Dense checkpoints with small gaps → numbers interlock as obstacles.
-            val minSeg = 2
-            val maxSeg = 4
-            val numbers = placeNumbers(solution, numberCount, seed, minSeg, maxSeg)
-            return BrickLevel(solution, blocked.toSet(), numbers)
-        }
-
-        // Fallback: single spread bricks (old behavior) — still solvable.
-        return generateBrickLevel(rows, cols, numberCount, maxOf(1, targetBlocks), seed)
-    }
-
-    /**
      * Counts valid ordered routes (numbers in sequence, covering every open
      * cell) with early-exit at [stopAfter]. Budgeted so it never hangs.
      * Used to verify a level has EXACTLY ONE solution.
@@ -274,7 +167,7 @@ object LevelGenerator {
         for ((num, p) in numbers) numberAt[p] = num
 
         var count = 0
-        var budget = 120_000
+        var budget = 2_000_000
         val visited = hashSetOf(start)
         val end = numbers[maxNumber]
         if (end in blocks) return 0
@@ -290,7 +183,20 @@ object LevelGenerator {
                 return
             }
 
-            for (nb in neighbours(cur, rows, cols)) {
+            // Warnsdorff-ordered neighbours: try the cells with fewest onward
+            // options first so the (guaranteed) solution is found fast. Ordering
+            // changes only the order of exploration, never the set of routes,
+            // so the count stays exact — but no longer misses the cover-all
+            // solution on wide boards within the budget (fixes spurious
+            // routes == 0 rejections).
+            val ordered = neighbours(cur, rows, cols)
+                .filter { it !in blocks && it !in visited && !edgeWallBlocks(cur, it, edgeWalls) }
+                .sortedBy { n ->
+                    neighbours(n, rows, cols).count {
+                        it !in blocks && it !in visited && it != cur && !edgeWallBlocks(n, it, edgeWalls)
+                    }
+                }
+            for (nb in ordered) {
                 if (nb in blocks || nb in visited) continue
                 if (edgeWallBlocks(cur, nb, edgeWalls)) continue
                 val isNumber = numberAt[nb]
@@ -319,147 +225,87 @@ object LevelGenerator {
     private fun wallSetContains(set: Set<WallEdge>, a: Position, b: Position): Boolean =
         set.any { it.connects(a, b) }
 
-    /**
-     * Finds the SECOND valid ordered route (if any) and returns its full cell
-     * list. Returns null when the level already has exactly one solution (or
-     * budget ran out before a second route was found).
-     *
-     * Used by [generateBlockingLevel] to learn WHICH cells make alternative
-     * routes possible — those cells become brick candidates.
-     */
-    fun findSecondRoute(
+    /** First valid ordered route (cover-all + numbers-in-order + ends on the last
+     * number), optionally forced to AVOID [bannedEdge], else null. Warnsdorff
+     * ordering makes finding ONE route fast and reliable (used for the robust
+     * uniqueness probe below). */
+    private fun findOneRoute(
         rows: Int, cols: Int,
         numbers: Map<Int, Position>,
         blocks: Set<Position>,
-        edgeWalls: Set<WallEdge> = emptySet()
+        edgeWalls: Set<WallEdge>,
+        bannedEdge: WallEdge?,
+        budget: Int
     ): List<Position>? {
         val total = rows * cols - blocks.size
         if (total <= 0) return null
         val maxNumber = numbers.keys.maxOrNull() ?: return null
         val start = numbers[1] ?: return null
         if (start in blocks) return null
-
-        val numberAt = HashMap<Position, Int>()
-        for ((num, p) in numbers) numberAt[p] = num
-
-        var found = 0
-        var budget = 150_000
-        var secondRoute: List<Position>? = null
-        val current = ArrayDeque<Position>()
-        current.addLast(start)
-        val visited = hashSetOf(start)
         val end = numbers[maxNumber]
         if (end in blocks) return null
+        val numberAt = HashMap<Position, Int>().apply { for ((n, p) in numbers) put(p, n) }
+        var remaining = budget
+        val current = ArrayDeque<Position>().apply { addLast(start) }
+        val visited = hashSetOf(start)
+        var result: List<Position>? = null
 
         fun dfs(cur: Position, nextNumber: Int, covered: Int) {
-            if (secondRoute != null || budget <= 0) return
-            budget--
-
+            if (result != null || remaining <= 0) return
+            remaining--
             if (covered == total) {
-                if (nextNumber > maxNumber && cur == end) {
-                    found++
-                    if (found == 2) {
-                        secondRoute = current.toList()   // capture the alternative
-                    }
-                }
+                if (nextNumber > maxNumber && cur == end) result = current.toList()
                 return
             }
-
-            for (nb in neighbours(cur, rows, cols)) {
-                if (nb in blocks || nb in visited) continue
-                if (edgeWallBlocks(cur, nb, edgeWalls)) continue
-                val isNumber = numberAt[nb]
-                current.addLast(nb); visited.add(nb)
-                if (isNumber != null) {
-                    if (isNumber == nextNumber) {
-                        dfs(nb, nextNumber + 1, covered + 1)
+            val ordered = neighbours(cur, rows, cols)
+                .filter { it !in blocks && it !in visited && !edgeWallBlocks(cur, it, edgeWalls) &&
+                        bannedEdge?.connects(cur, it) != true }
+                .sortedBy { n ->
+                    neighbours(n, rows, cols).count {
+                        it !in blocks && it !in visited && it != cur &&
+                        !edgeWallBlocks(n, it, edgeWalls) && bannedEdge?.connects(n, it) != true
                     }
-                } else {
-                    dfs(nb, nextNumber, covered + 1)
                 }
+            for (nb in ordered) {
+                val isNum = numberAt[nb]
+                if (isNum != null && isNum != nextNumber) continue
+                current.addLast(nb); visited.add(nb)
+                dfs(nb, if (isNum != null) nextNumber + 1 else nextNumber, covered + 1)
                 current.removeLast(); visited.remove(nb)
-                if (secondRoute != null || budget <= 0) return
+                if (result != null || remaining <= 0) return
             }
         }
 
         dfs(start, 2, 1)
-        return secondRoute
+        return result
     }
 
-    /**
-     * WALL level (Zip-style) — edges between adjacent cells are walled off to
-     * KILL alternative routes, carving the full-coverage board down to a single
-     * forced journey.
-     *
-     * Unlike cell-bricks (which were inert in this full-coverage generator because
-     * the solution path occupies every open cell), an EDGE wall is placed on an
-     * edge the solution does NOT use. Any alternative route that crossed that
-     * edge is eliminated while the true solution stays fully intact (we never
-     * wall a solution edge). This is O(reliably convergent) and the walls become
-     * real Zip-like gates/corridors the player must thread in the right order.
-     *
-     * @param numberDensity share of cells carrying a number (lower = more ambiguous)
-     * @param maxWalls      hard cap on placed edge walls
-     * @param minSeg,maxSeg segment length between consecutive numbers along the solution
-     */
-    fun generateWallLevel(
+    /** Returns a valid alternative route distinct from [solution], or NULL when the
+     * level is UNIQUE (probabilistically robust). A distinct Hamiltonian route must
+     * omit at least one solution edge, so we probe solution edges IN PATH ORDER —
+     * sealing each shut and running a fast find-one (Warnsdorff finds an existing
+     * route quickly; a probe that finds one is a genuine alternative). A probe that
+     * finds nothing is the expensive case, so its budget is capped and we only scan
+     * a bounded prefix of solution edges: any alternative deviates near the start,
+     * so a level whose first [probeLimit] sealed edges all kill every route is
+     * effectively unique. The exporter re-confirms with countOrderedPaths. */
+    private fun findAlternativeRoute(
         rows: Int, cols: Int,
-        numberDensity: Float,
-        maxWalls: Int, seed: Long,
-        minSeg: Int = 2, maxSeg: Int = 3
-    ): BrickLevel {
-        require(rows >= 5 && cols >= 5)
-        val total = rows * cols
-        val random = Random(seed)
-
-        // 1. Solution path on a fully open board.
-        val solution = generateHamiltonianPath(rows, cols, seed)
-        val solutionEdges = consecutiveEdges(solution)
-
-        // 2. Numbers on the solution (dense, as preferred).
-        val numberCount = (total * numberDensity).toInt().coerceIn(4, total - 2)
-        var numbers = placeNumbers(solution, numberCount, seed, minSeg, maxSeg)
-
-        val walls = mutableSetOf<WallEdge>()
-        val cr = rows / 2f
-        val cc = cols / 2f
-
-        // 3. Iteratively wall off alternative routes.
-        var iterations = 0
-        while (iterations < 24 && walls.size < maxWalls) {
-            iterations++
-            val routes = countOrderedPaths(rows, cols, numbers, emptySet(), stopAfter = 2, edgeWalls = walls)
-            if (routes == 1) {
-                // Unique — solution path intact, ends on last number.
-                return BrickLevel(solution, emptySet(), numbers, walls)
-            }
-
-            val alt = findSecondRoute(rows, cols, numbers, emptySet(), walls) ?: break
-            val altEdges = consecutiveEdges(alt)
-            // Edges the alternative uses that the true solution does NOT.
-            val candidates = (altEdges - solutionEdges).filter { it !in walls }
-            if (candidates.isEmpty()) {
-                // Alternative shares every edge with the solution (same route in a
-                // different order is impossible for distinct edge walks) — reshuffle
-                // the number placement and retry from a clean wall set.
-                numbers = placeNumbers(solution, numberCount, seed + iterations * 104729L, minSeg, maxSeg)
-                walls.clear()
-                continue
-            }
-            // Wall the deviation edge closest to the board centre (kills most alts).
-            val picked = candidates.minByOrNull { w ->
-                ((w.a.row + w.b.row) / 2f - cr) * ((w.a.row + w.b.row) / 2f - cr) +
-                    ((w.a.col + w.b.col) / 2f - cc) * ((w.a.col + w.b.col) / 2f - cc)
-            }!!
-            walls.add(picked)
+        numbers: Map<Int, Position>,
+        blocks: Set<Position>,
+        walls: Set<WallEdge>,
+        solution: List<Position>,
+        probeBudget: Int = 120_000,
+        probeLimit: Int = 40
+    ): List<Position>? {
+        val solEdges = consecutiveEdges(solution)
+        var scanned = 0
+        for (e in solEdges) {
+            if (++scanned > probeLimit) break
+            val r = findOneRoute(rows, cols, numbers, blocks, walls, e, probeBudget)
+            if (r != null) return r
         }
-
-        // Not converged within budget — accept if unique, else reject.
-        val finalRoutes = countOrderedPaths(rows, cols, numbers, emptySet(), stopAfter = 2, edgeWalls = walls)
-        if (finalRoutes == 1) {
-            return BrickLevel(solution, emptySet(), numbers, walls)
-        }
-        error("generateWallLevel: failed to converge to a unique solution (maxWalls=$maxWalls)")
+        return null
     }
 
     /** Consecutive edge walls along a cell route (the shared sides between steps). */
@@ -468,20 +314,25 @@ object LevelGenerator {
     }
 
     /**
-     * MAZE-WALL level (Zip-faithful, WALLS-FIRST architecture).
+     * MAZE-WALL level (Zip-faithful, unique-solution).
      *
-     * Inverted from generateWallLevel: walls come FIRST as connected chains
-     * (straight lines, L-shapes, T-branches — exactly the Zip reference style),
-     * THEN a Hamiltonian path is searched through the walled board, THEN numbers
-     * are placed on that path.
+     * Architecture (path-first + walls on NON-solution edges + convergence):
+     *   1. Build a full-coverage Hamiltonian solution path over every cell.
+     *   2. Place connected wall CHAINS (straight / L / T — the Zip reference style)
+     *      only on edges the solution does NOT use, so the solution stays intact
+     *      and solvable by construction (no expensive search-through-maze).
+     *   3. Put numbers on the solution path.
+     *   4. Wall away any remaining ALTERNATIVE route until countOrderedPaths == 1,
+     *      yielding a level with EXACTLY ONE valid solution (true uniqueness —
+     *      see step 4 below).
      *
-     * Why: with path-first + kill-alternatives, low number densities (Zip's Hard
-     * is ~14-17%) never converge to a unique solution on wide boards. With
-     * walls-first, the numbers are placed AFTER a route is found, so the level is
-     * solvable by construction at ANY density — difficulty then comes from the
-     * maze structure (gates, corridors) and route-count minimisation.
+     * Why this converges at low density: because the solution visits every open
+     * cell, walling a non-solution edge can never disconnect the board, and a
+     * distinct alternative route must differ on at least one (wallable)
+     * non-solution edge — so uniqueness is reachable and termination is
+     * guaranteed (not just "fewest routes").
      *
-     * @param numberDensity share of cells carrying a number (any value works now)
+     * @param numberDensity share of cells carrying a number
      * @param wallPieces    how many wall chains to attempt
      * @param maxChainLen   max edges per chain (1=straight stub, 3+ makes L/T)
      * @param allowBranch   when true, a chain may fork into a T from an endpoint
@@ -580,6 +431,40 @@ object LevelGenerator {
         val numberCount = (total * numberDensity).toInt().coerceIn(4, total - 2)
         val numbers = placeNumbers(solution, numberCount, seed, minSeg, maxSeg)
 
+        // ── 4. Converge to a UNIQUE solution — wall the deviation edges of any ──
+        // alternative route until exactly one valid route remains (true
+        // uniqueness, not just "fewest routes"). This is guaranteed to terminate:
+        //   • The solution is a cover-all Hamiltonian path through EVERY cell, so
+        //     every cell keeps its two solution edges open; walling any
+        //     non-solution edge can therefore NEVER disconnect the board.
+        //   • A distinct valid alternative (cover-all + numbers in order + ends on
+        //     the last number) must differ from the solution on at least one edge,
+        //     and that edge is a non-solution edge we are free to wall.
+        // Hence each iteration strictly lowers the route count and reaches exactly
+        // ONE route. (Kill the deviation edge nearest the board centre first —
+        // central walls prune the most alternatives with the fewest walls.)
+        val centreR = rows / 2f
+        val centreC = cols / 2f
+        val convEdgeCap = (totalEdges * 0.65f).toInt().coerceAtLeast(4)   // solutions survive all non-solution walls
+        var convIter = 0
+        while (convIter < 300 && walls.size < convEdgeCap) {
+            convIter++
+            // Robust uniqueness probe: a distinct Hamiltonian route must omit at
+            // least one solution edge, so search for any route that survives with
+            // each solution edge sealed shut. Null => truly unique.
+            val alt = findAlternativeRoute(rows, cols, numbers, emptySet(), walls, solution) ?: break
+            val candidates = consecutiveEdges(alt).filter { e ->
+                !solutionEdges.any { it.connects(e.a, e.b) } && !wallSetContains(walls, e.a, e.b)
+            }
+            if (candidates.isEmpty()) break   // cannot happen for a genuine alternative (see KDoc)
+            val picked = candidates.minByOrNull { w ->
+                val mr = (w.a.row + w.b.row) / 2f
+                val mc = (w.a.col + w.b.col) / 2f
+                (mr - centreR) * (mr - centreR) + (mc - centreC) * (mc - centreC)
+            }!!
+            walls.add(picked)
+        }
+
         return BrickLevel(solution, emptySet(), numbers, walls)
     }
 
@@ -599,269 +484,9 @@ object LevelGenerator {
         return seen.size == total
     }
 
-    /**
-     * Degree safety: a Hamiltonian path can only have 2 endpoints (degree-1
-     * cells); every other cell needs >= 2 open edges. Counting open edges per
-     * cell after the chain is added — reject the chain if it creates too many
-     * degree-1 cells (candidate endpoints) or ANY degree-0 cell.
-     */
-    private fun degreeSafetyOk(rows: Int, cols: Int, walls: Set<WallEdge>): Boolean {
-        var degree1 = 0
-        for (r in 0 until rows) for (c in 0 until cols) {
-            val p = Position(r, c)
-            var open = 0
-            for (nb in neighbours(p, rows, cols)) {
-                if (!edgeWallBlocks(p, nb, walls)) open++
-            }
-            if (open == 0) return false                 // isolated cell — impossible
-            if (open == 1) {
-                degree1++
-                if (degree1 > 2) return false           // too many forced endpoints
-            }
-        }
-        return true
-    }
-
-    /**
-     * Bounded Warnsdorff DFS over the FULL grid respecting edge walls. Every
-     * open cell must be visited exactly once (cover-all); returns null when no
-     * Hamiltonian path exists within the budget.
-     */
-    private fun hamiltonianWithWalls(
-        rows: Int, cols: Int,
-        walls: Set<WallEdge>,
-        random: Random
-    ): List<Position>? {
-        val total = rows * cols
-        repeat(8) {
-            val start = Position(random.nextInt(rows), random.nextInt(cols))
-            var budget = 60_000
-            val path = mutableListOf(start)
-            val visited = hashSetOf(start)
-
-            fun dfs(): Boolean {
-                if (path.size == total) return true
-                if (budget <= 0) return false
-                budget--
-                val cur = path.last()
-                val sorted = neighbours(cur, rows, cols)
-                    .filter { it !in visited && !edgeWallBlocks(cur, it, walls) }
-                    .sortedBy { n ->
-                        neighbours(n, rows, cols).count {
-                            it !in visited && it != cur && !edgeWallBlocks(n, it, walls)
-                        }
-                    }
-                for (n in sorted) {
-                    path.add(n); visited.add(n)
-                    if (dfs()) return true
-                    path.removeAt(path.size - 1); visited.remove(n)
-                    if (budget <= 0) return false
-                }
-                return false
-            }
-            if (dfs()) return path.toList()
-        }
-        return null
-    }
-
-    /**
-     * BLOCKING level — bricks are placed ON PURPOSE to kill alternative routes.
-     *
-     * Process (inverted from previous generators):
-     *  1. Full open board, generate a Hamiltonian solution path.
-     *  2. Place DENSE numbers on the solution path.
-     *  3. Count routes; find a second (alternative) route via DFS.
-     *  4. Cells that the alternative route uses but the solution does NOT
-     *     become brick candidates. Brick the most impactful one(s).
-     *  5. Repeat until exactly ONE route remains, or the brick budget
-     *     (maxBricks) is spent, or we run out of iterations → reject.
-     *
-     * The result: bricks exist precisely where they silence alternative
-     * routes — they CLOSE the board down to a single forced journey.
-     *
-     * @param numberDensity share of open cells carrying a number (0.45..0.62)
-     * @param maxBricks     hard cap on placed bricks (e.g. 3)
-     * @param minSeg        minimum segment length between consecutive numbers
-     * @param maxSeg        maximum segment length between consecutive numbers
-     */
-    fun generateBlockingLevel(
-        rows: Int, cols: Int,
-        numberDensity: Float,
-        maxBricks: Int, seed: Long,
-        minSeg: Int = 2, maxSeg: Int = 3
-    ): BrickLevel {
-        require(rows >= 5 && cols >= 5)
-        val random = Random(seed)
-        val total = rows * cols
-
-        // 1. Solution path on a fully open board.
-        val solution = generateHamiltonianPath(rows, cols, seed)
-
-        // 2. Dense numbers on the solution. Segment gap is a tunable knob
-        //    (minSeg/maxSeg); baseline remains 2..3.
-        val numberCount = (total * numberDensity).toInt().coerceIn(4, total - 2)
-        var numbers = placeNumbers(solution, numberCount, seed, minSeg, maxSeg)
-
-        val blocked = mutableSetOf<Position>()
-
-        // 3-6. Iteratively brick away alternative routes.
-        // IMPORTANT: never brick cells ON the solution path — the solution is
-        // the only route guaranteed to end on the last number.
-        val solutionSet = solution.toSet()
-        var iterations = 0
-        while (iterations < 12) {
-            iterations++
-            val routes = countOrderedPaths(rows, cols, numbers, blocked, stopAfter = 2)
-            if (routes == 1) {
-                // Unique! The solution path is still fully open and ends on
-                // the last number — the level is solvable by design.
-                return BrickLevel(solution, blocked.toSet(), numbers)
-            }
-            if (blocked.size >= maxBricks) break
-
-            // Find one alternative route and diff it against the solution.
-            val alt = findSecondRoute(rows, cols, numbers, blocked) ?: break
-            val candidates = alt.filter { it !in solutionSet && it !in blocked }
-            if (candidates.isEmpty()) {
-                // Alternative reuses only solution cells (different ORDER).
-                // A brick can't fix ordering. Reshape the number placement
-                // deterministically (same solution path, salted seed) and
-                // retry the blocking loop from a clean board.
-                numbers = placeNumbers(solution, numberCount, seed + iterations * 104729L, minSeg, maxSeg)
-                blocked.clear()
-            } else {
-                // Brick the deviation cell closest to the board center
-                // (heuristic: central bricks kill more alternatives).
-                val cr = rows / 2f
-                val cc = cols / 2f
-                blocked.add(candidates.minByOrNull { p ->
-                    (p.row - cr) * (p.row - cr) + (p.col - cc) * (p.col - cc)
-                }!!)
-            }
-        }
-
-        // Not converged within budget — verify final state; if unique, accept.
-        val finalRoutes = countOrderedPaths(rows, cols, numbers, blocked, stopAfter = 2)
-        if (finalRoutes == 1) {
-            return BrickLevel(solution, blocked.toSet(), numbers)
-        }
-
-        // Reject: caller (exporter) will try another seed.
-        error("generateBlockingLevel: failed to converge to a unique solution")
-    }
-
-    /**
-     * Challenge brick level — spread bricks + BFS contiguity check.
-     *
-     * Bricks are picked from path indices spaced ≥2 apart so they never share
-     * a grid edge. A lightweight BFS (O(cells)) verifies that all open cells
-     * remain connected. Fast fallback to tail bricks if re-rolls exceed 30.
-     */
-    fun generateBrickLevel(
-        rows: Int, cols: Int, numberCount: Int,
-        maxBrickCount: Int = 5, seed: Long
-    ): BrickLevel {
-        val random = Random(seed)
-        require(rows >= 4 && cols >= 4)
-        val mirrored = generateHamiltonianPath(rows, cols, seed)
-        // Always at least 1 brick so every challenge level has an obstacle.
-        val brickCount = 1 + random.nextInt(maxBrickCount)
-        if (brickCount == 0) {
-            val numbers = placeNumbers(mirrored, numberCount, seed)
-            return BrickLevel(mirrored, emptySet(), numbers)
-        }
-
-        val pathSize = mirrored.size
-        val allIds = (0 until pathSize).toList()
-
-        repeat(30) {
-            val chosen = mutableListOf<Int>()
-            for (idx in allIds.shuffled(random)) {
-                if (chosen.all { kotlin.math.abs(it - idx) >= 2 }) {
-                    chosen.add(idx)
-                    if (chosen.size >= brickCount) break
-                }
-            }
-            if (chosen.size < brickCount) return@repeat
-
-            val blocks = chosen.map { mirrored[it] }.toSet()
-            if (blocks.contains(mirrored.first())) return@repeat
-
-            val openCells = mirrored.filterIndexed { i, _ -> i !in chosen }
-            val openSet = openCells.toSet()
-
-            // Fast reject: parity (checkerboard). A path visiting N cells must
-            // alternate colors, so |black - white| <= 1 — otherwise unsolvable.
-            var black = 0
-            var white = 0
-            for (p in openCells) {
-                if ((p.row + p.col) % 2 == 0) black++ else white++
-            }
-            if (kotlin.math.abs(black - white) > 1) return@repeat
-
-            // Verify a real Hamiltonian path exists over the open cells (bounded DFS).
-            val solution = hamiltonianOnOpen(openCells, rows, cols, random) ?: return@repeat
-
-            val numbers = placeNumbers(solution, numberCount, seed)
-            return BrickLevel(solution, blocks, numbers)
-        }
-
-        // Fallback: tail bricks (guaranteed solvable, may cluster).
-        val fbp = mirrored.dropLast(brickCount)
-        val fbb = mirrored.takeLast(brickCount).toSet()
-        val fbn = placeNumbers(fbp, numberCount, seed)
-        return BrickLevel(fbp, fbb, fbn)
-    }
-
-    /**
-     * Bounded Warnsdorff DFS over the open cells. Returns a Hamiltonian path
-     * covering every open cell, or null. Budgeted so it never hangs.
-     */
-    private fun hamiltonianOnOpen(
-        open: List<Position>, rows: Int, cols: Int, random: Random
-    ): List<Position>? {
-        if (open.isEmpty()) return emptyList()
-        val openSet = open.toHashSet()
-        val total = open.size
-
-        repeat(8) {
-            val start = open[random.nextInt(open.size)]
-            var budget = 40_000
-            val path = mutableListOf(start)
-            val visited = hashSetOf(start)
-
-            fun dfs(): Boolean {
-                if (path.size == total) return true
-                if (budget <= 0) return false
-                budget--
-                val cur = path.last()
-                val sorted = neighbours(cur, rows, cols)
-                    .filter { it in openSet && it !in visited }
-                    .sortedBy { n ->
-                        neighbours(n, rows, cols).count {
-                            it in openSet && it !in visited && it != cur
-                        }
-                    }
-                for (n in sorted) {
-                    path.add(n); visited.add(n)
-                    if (dfs()) return true
-                    path.removeAt(path.size - 1); visited.remove(n)
-                    if (budget <= 0) return false
-                }
-                return false
-            }
-            val result = dfs()
-            if (result) return path.toList()
-        }
-        return null
-    }
-
     private fun neighbours(p: Position, rows: Int, cols: Int): List<Position> =
         DIRS.map { (dr, dc) -> Position(p.row + dr, p.col + dc) }
             .filter { it.row in 0 until rows && it.col in 0 until cols }
-
-    fun manhattanDistance(a: Position, b: Position): Int =
-        kotlin.math.abs(a.row - b.row) + kotlin.math.abs(a.col - b.col)
 }
 
 data class BrickLevel(

@@ -4,10 +4,11 @@ import org.junit.Test
 import java.io.File
 
 /**
- * One-shot exporter with blocking bricks + uniqueness guarantee.
- * Challenge candidates come from generateBlockingLevel (bricks placed
- * precisely to kill alternative routes); only levels with exactly one
- * valid route are exported. Prints the full difficulty acceptance table.
+ * One-shot exporter with edge-walls + uniqueness guarantee.
+ * Challenge candidates come from LevelFactory.generateMazeWallLevel (wall
+ * chains on non-solution edges + convergence to a single valid route); only
+ * levels with exactly one valid route are exported. Prints the difficulty
+ * acceptance table.
  * Run with:
  *   ./gradlew :app:testDebugUnitTest --tests "*LevelExporter*exportAllLevels*"
  */
@@ -43,7 +44,7 @@ class LevelExporter {
     fun exportAllLevels() {
         val assets = File("src/main/assets").apply { mkdirs() }
         val table = StringBuilder()
-        table.appendLine("=== Challenge 50 levels — HARDCORE breakpoint @ L10 ===")
+        table.appendLine("=== Challenge 50 levels — unique-solution, re-anchored curve (48→76) ===")
         table.appendLine("Lvl | Grid | Nums | Dens | Gap | Bricks | Uniq | Br | Frc | nearF | nearP | DevM | Score | Tgt | Rej")
 
         for (mode in GameMode.entries) {
@@ -63,22 +64,20 @@ class LevelExporter {
                     val nCandidates = LevelFactory.candidatesFor(level)
                     for (attempt in 0 until nCandidates) {
                         val gs = LevelFactory.buildWithSeedOrNull(mode, level, seedFor(mode, level, attempt))
-                        if (gs == null) { rejections++; continue }   // no Hamiltonian path through maze
+                        if (gs == null) { rejections++; continue }   // no path through maze
                         val routes = LevelGenerator.countOrderedPaths(
-                            gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 8, edgeWalls = gs.edgeWalls
+                            gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2, edgeWalls = gs.edgeWalls
                         )
-                        if (routes < 1) { rejections++; println("L$level att=$attempt: routes=0"); continue }
+                        if (routes != 1) { rejections++; println("L$level att=$attempt: routes=$routes (not-unique)"); continue }
                         val sc = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions)
-                        // Zip-faithful: prefer candidates with FEWEST valid routes
-                        // (closest to unique) within this level, then difficulty.
-                        val routePenalty = (routes - 1) * 4   // each extra route ~ 4 target points
-                        val dist = kotlin.math.abs(sc.total - target) + routePenalty
+                        // This is a UNIQUE solvable candidate — pick the one closest to target.
+                        val dist = kotlin.math.abs(sc.total - target)
                         if (best == null || dist < best.third) {
                             best = Triple(attempt, gs, dist)
                             chosenScore = sc.total
                         }
                     }
-                    chosen = best ?: error("Level $level: no solvable candidate in $nCandidates attempts")
+                    chosen = best ?: error("Level $level: no UNIQUE solvable candidate in $nCandidates attempts")
                     // Record for the boss-zone rolling window (keep last 5).
                     recentScores.addLast(chosenScore)
                     while (recentScores.size > 5) recentScores.removeFirst()
@@ -143,9 +142,9 @@ class LevelExporter {
             checkNotNull(last) { "Level $level: missing final number" }
 
             val routes = LevelGenerator.countOrderedPaths(
-                gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 8, edgeWalls = gs.edgeWalls
+                gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2, edgeWalls = gs.edgeWalls
             )
-            check(routes >= 1) { "Level $level: expected a valid route (solvable), got $routes" }
+            check(routes == 1) { "Level $level: expected EXACTLY ONE valid route (unique-solution), got $routes" }
         }
     }
 

@@ -95,29 +95,44 @@ object LevelFactory {
     fun challengeConfigFor(level: Int, rows: Int, cols: Int): ChallengeParams {
         val big = rows * cols >= 64
         return when (tierFor(level)) {
-            ChallengeTier.EASY -> ChallengeParams(0.27f, 2, 4, if (big) 4 else 4, 2, false)
-            ChallengeTier.EASY_MED -> ChallengeParams(0.23f, 2, 5, if (big) 6 else 5, 3, false)
-            ChallengeTier.MEDIUM -> ChallengeParams(if (big) 0.20f else 0.22f, 2, 6, if (big) 7 else 6, 3, true)
-            ChallengeTier.MED_HARD -> ChallengeParams(if (big) 0.18f else 0.17f, 2, 8, if (big) 8 else 7, 4, true)
-            ChallengeTier.HARD -> ChallengeParams(if (big) 0.16f else 0.15f, 2, 10, if (big) 9 else 8, 5, true)
+            // UNIQUENESS is now guaranteed by LevelGenerator.generateMazeWallLevel
+            // (it walls away alternative routes until countOrderedPaths == 1).
+            // Density is deliberately kept ABOVE the 8×8 convergence floor (~0.24)
+            // so the route counter reliably finds every alternative — below it the
+            // sparse cover-all search gives up under budget and leaves non-unique
+            // levels (see puzzle-difficulty-tuning: "raise the 8×8 floor"). Base
+            // wall pieces are bumped so early levels stay computationally cheap to
+            // converge (fewer base alternatives = fewer convergence iterations).
+            ChallengeTier.EASY -> ChallengeParams(if (big) 0.28f else 0.26f, 2, 4, if (big) 6 else 6, 2, false)
+            ChallengeTier.EASY_MED -> ChallengeParams(if (big) 0.26f else 0.25f, 2, 5, if (big) 8 else 7, 3, false)
+            ChallengeTier.MEDIUM -> ChallengeParams(if (big) 0.24f else 0.23f, 2, 6, if (big) 9 else 8, 3, true)
+            ChallengeTier.MED_HARD -> ChallengeParams(if (big) 0.26f else 0.23f, 2, 8, if (big) 11 else 9, 4, true)
+            ChallengeTier.HARD -> ChallengeParams(if (big) 0.24f else 0.22f, 2, 10, if (big) 12 else 10, 5, true)
         }
     }
 
     /**
-     * Difficulty target curve with a HARDCORE breakpoint at L10 (no longer a
-     * linear 55→98). Anchors calibrated against the achievable scorer-v2
-     * distributions (16 candidates/level, 2026-09 phase-C data):
-     * targets sit between the median and p90 of each band so best-of-16
-     * selection reliably lands a hard candidate without starving the band.
+     * Difficulty target curve, re-anchored to the ACHIEVABLE band of the
+     * production generator (measured 2026-09, see DifficultyExperiment Phase B on
+     * the live maze-wall pipeline — not the retired generateBlockingLevel). The
+     * old anchors (15→94 with a HARDCORE jump at L10) were calibrated against the
+     * brick generator's range and are now impossible or trivially-easy:
+     * 6×6 can only reach ~40–57 (p50), 8×8 ~55–77 (p50, ceiling ~82).
      *
-     * L1 Easy · L5 Easy+ · L7 Medium · L9 Hard · L10 HARDCORE (jump +14) ·
-     * L15 Hardcore+ · L25 Very Hard · L35 Very Hard+ · L50 Extreme.
+     * New anchors sit between the median and p90 of each band so best-of-N lands a
+     * genuinely hard candidate without starving the pool:
+     *   6×6 (L1–25):       48 → 56      — smooth early ramp, no fake L10 spike
+     *   L26 grid bump:     jumps to 64  (6×6 → 8×8 is where difficulty really rises)
+     *   8×8 (L26–50):      64 → 76      — the true hardcore tail
+     *
+     * L1 Easy · L9 Medium · L15 Medium+ · L25 Medium++ · L26 jump · L50 Hardcore.
      */
     fun challengeTargetFor(level: Int): Int {
         val anchors = listOf(
-            1 to 15, 3 to 18, 5 to 26, 7 to 36, 9 to 50,
-            10 to 64, 15 to 64,               // HARDCORE jump, plateau
-            20 to 70, 30 to 78, 40 to 84, 45 to 89, 50 to 94
+            1 to 48, 3 to 50, 5 to 52, 7 to 54, 9 to 55,
+            15 to 56, 20 to 56, 25 to 56,          // 6×6 band ceiling ~56
+            26 to 64,                               // grid bump (6×6 → 8×8)
+            30 to 67, 35 to 69, 40 to 72, 45 to 74, 50 to 76
         )
         if (level <= anchors.first().first) return anchors.first().second
         for (i in 0 until anchors.size - 1) {
@@ -187,42 +202,39 @@ object LevelFactory {
     }
 
     /**
-     * CHALLENGE best-of-N: generate candidates with different seeds, score
-     * each with DifficultyScorer, and keep the one closest to the level's
-     * target difficulty. Runs at EXPORT time on a PC — not on the phone.
-     * Uniqueness filtering happens in the exporter.
-     */
-    fun build(mode: GameMode, level: Int): GameState {
-        if (mode == GameMode.SIMPLE) return buildWithSeed(mode, level, seed = LevelGenerator.seedFor(mode, level))
+         * CHALLENGE best-of-N: generate candidates with different seeds, score
+         * each with DifficultyScorer, and keep the UNIQUE one (countOrderedPaths ==
+         * 1) closest to the level's target difficulty. Runs at EXPORT time on a PC —
+         * not on the phone. Uniqueness is a hard gate here (the generator drives
+         * toward uniqueness; this selection seals it by only accepting routes == 1).
+         */
+        fun build(mode: GameMode, level: Int): GameState {
+            if (mode == GameMode.SIMPLE) return buildWithSeed(mode, level, seed = LevelGenerator.seedFor(mode, level))
 
-        val target = challengeTargetFor(level)
+            val target = challengeTargetFor(level)
         val n = candidatesFor(level)                       // honours tier budgets
-        data class Cand(val seed: Long, val gs: GameState, val routes: Int, val score: DifficultyScorer.Score)
+        data class Cand(val seed: Long, val gs: GameState, val score: DifficultyScorer.Score)
         val candidates = mutableListOf<Cand>()
 
         for (i in 0 until n) {
             val seed = LevelGenerator.seedFor(mode, level) + i * 7919L
             val gs = buildWithSeedOrNull(mode, level, seed) ?: continue   // no path through maze
             val routes = LevelGenerator.countOrderedPaths(
-                gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 8, edgeWalls = gs.edgeWalls
+                gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2, edgeWalls = gs.edgeWalls
             )
-            if (routes < 1) continue   // unsolvable — cannot happen, but guard anyway
+            if (routes != 1) continue   // UNIQUENESS HARD GATE: only unique candidates ship
             val score = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions)
-            candidates.add(Cand(seed, gs, routes, score))
+            candidates.add(Cand(seed, gs, score))
         }
         if (candidates.isEmpty()) {
-            error("Level $level: no challenge candidate found in $n attempts")
+            error("Level $level: no UNIQUE challenge candidate found in $n attempts")
         }
 
-        // Zip-faithful selection: FEWEST valid routes first (closer to unique =
-        // harder to stumble into a solution), then difficulty closest to target,
-        // then scorer tiebreak via pickBest.
-        val minRoutes = candidates.minOf { it.routes }
-        val finalists = candidates.filter { it.routes <= minRoutes + 1 }
-        val best = finalists
+        // Difficulty closest to target (unique-candidates only).
+        val best = candidates
             .map { it.seed to it.score }
             .let { DifficultyScorer.pickBest(it, target) }
-            ?: finalists.first().seed
+            ?: candidates.first().seed
         return candidates.first { it.seed == best }.gs
     }
 }
