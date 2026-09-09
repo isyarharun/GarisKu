@@ -44,7 +44,7 @@ class LevelExporter {
     fun exportAllLevels() {
         val assets = File("src/main/assets").apply { mkdirs() }
         val table = StringBuilder()
-        table.appendLine("=== Challenge 50 levels — unique-solution, re-anchored curve (48→76) ===")
+        table.appendLine("=== Challenge 50 levels — unique-solution; grids 8x8 (L1-25) / 10x10 (L26-50); count 8..10 ===")
         table.appendLine("Lvl | Grid | Nums | Dens | Gap | Bricks | Uniq | Br | Frc | nearF | nearP | DevM | Score | Tgt | Rej")
 
         for (mode in GameMode.entries) {
@@ -65,10 +65,20 @@ class LevelExporter {
                     for (attempt in 0 until nCandidates) {
                         val gs = LevelFactory.buildWithSeedOrNull(mode, level, seedFor(mode, level, attempt))
                         if (gs == null) { rejections++; continue }   // no path through maze
-                        val routes = LevelGenerator.countOrderedPaths(
-                            gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2, edgeWalls = gs.edgeWalls
+                        val known = gs.solutionPath ?: run { rejections++; continue }
+                        if (!LevelGenerator.validateKnownSolution(
+                                gs.rows, gs.cols, gs.numberPositions, gs.blocks, gs.edgeWalls, known
+                            )) {
+                            rejections++; println("L$level att=$attempt: known solution invalid"); continue
+                        }
+                        val alternative = LevelGenerator.findAlternativeOrderedPath(
+                            gs.rows, gs.cols, gs.numberPositions, gs.blocks, gs.edgeWalls, known
                         )
-                        if (routes != 1) { rejections++; println("L$level att=$attempt: routes=$routes (not-unique)"); continue }
+                        if (alternative.alternativeFound || alternative.budgetExhausted) {
+                            rejections++
+                            println("L$level att=$attempt: alternative=${alternative.alternativeFound}, budget=${alternative.budgetExhausted}")
+                            continue
+                        }
                         val sc = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions)
                         // This is a UNIQUE solvable candidate — pick the one closest to target.
                         val dist = kotlin.math.abs(sc.total - target)
@@ -134,17 +144,29 @@ class LevelExporter {
         for (level in 1..LevelFactory.LEVEL_COUNT) {
             val attempt = readSeedAttempt(GameMode.CHALLENGE, level)
                 ?: error("Level $level: missing seed_attempt")
-            val gs = LevelFactory.buildWithSeed(GameMode.CHALLENGE, level, seedFor(GameMode.CHALLENGE, level, attempt))
-
-            val first = gs.numberPositions[1]
-            val last = gs.numberPositions[gs.totalNumbers]
-            checkNotNull(first) { "Level $level: missing number 1" }
-            checkNotNull(last) { "Level $level: missing final number" }
-
-            val routes = LevelGenerator.countOrderedPaths(
-                gs.rows, gs.cols, gs.numberPositions, gs.blocks, stopAfter = 2, edgeWalls = gs.edgeWalls
+            val known = LevelFactory.buildWithSeed(
+                GameMode.CHALLENGE, level, seedFor(GameMode.CHALLENGE, level, attempt)
+            ).solutionPath ?: error("Level $level: missing generated solution path")
+            val rebuilt = LevelFactory.buildWithSeed(
+                GameMode.CHALLENGE, level, seedFor(GameMode.CHALLENGE, level, attempt)
             )
-            check(routes == 1) { "Level $level: expected EXACTLY ONE valid route (unique-solution), got $routes" }
+            check(LevelGenerator.validateKnownSolution(
+                rebuilt.rows, rebuilt.cols, rebuilt.numberPositions, rebuilt.blocks, rebuilt.edgeWalls, known
+            )) { "Level $level: generated solution failed direct validation" }
+            val alternative = LevelGenerator.findAlternativeOrderedPath(
+                rebuilt.rows, rebuilt.cols, rebuilt.numberPositions, rebuilt.blocks, rebuilt.edgeWalls, known
+            )
+            check(!alternative.alternativeFound && !alternative.budgetExhausted) {
+                "Level $level: uniqueness verification failed: $alternative"
+            }
+            check(if (level <= 25) rebuilt.rows == 8 && rebuilt.cols == 8 else rebuilt.rows == 10 && rebuilt.cols == 10) {
+                "Level $level: unexpected grid ${rebuilt.rows}x${rebuilt.cols}"
+            }
+            check(rebuilt.numberPositions.size in 8..10) {
+                "Level $level: expected 8..10 numbers, got ${rebuilt.numberPositions.size}"
+            }
+            checkNotNull(rebuilt.numberPositions[1]) { "Level $level: missing number 1" }
+            checkNotNull(rebuilt.numberPositions[rebuilt.totalNumbers]) { "Level $level: missing final number" }
         }
     }
 

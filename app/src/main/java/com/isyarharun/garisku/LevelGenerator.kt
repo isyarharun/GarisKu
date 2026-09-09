@@ -225,33 +225,127 @@ object LevelGenerator {
     private fun wallSetContains(set: Set<WallEdge>, a: Position, b: Position): Boolean =
         set.any { it.connects(a, b) }
 
-    /** First valid ordered route (cover-all + numbers-in-order + ends on the last
-     * number), optionally forced to AVOID [bannedEdge], else null. Warnsdorff
-     * ordering makes finding ONE route fast and reliable (used for the robust
-     * uniqueness probe below). */
-    private fun findOneRoute(
+    data class AlternativePathResult(
+        val alternativeFound: Boolean,
+        val budgetExhausted: Boolean,
+        val probes: Int
+    )
+
+    /** Validates the Hamiltonian solution returned by the generator directly. */
+    fun validateKnownSolution(
+        rows: Int, cols: Int,
+        numbers: Map<Int, Position>,
+        blocks: Set<Position>,
+        edgeWalls: Set<WallEdge>,
+        solution: List<Position>
+    ): Boolean {
+        val total = rows * cols - blocks.size
+        val maxNumber = numbers.keys.maxOrNull() ?: return false
+        if (solution.size != total || solution.toSet().size != solution.size) return false
+        if (solution.firstOrNull() != numbers[1] || solution.lastOrNull() != numbers[maxNumber]) return false
+        val numberAt = numbers.entries.associate { it.value to it.key }
+        var nextNumber = 1
+        for (i in solution.indices) {
+            val p = solution[i]
+            if (p in blocks) return false
+            val n = numberAt[p]
+            if (n != null) {
+                if (n != nextNumber) return false
+                nextNumber++
+            }
+            if (i + 1 < solution.size) {
+                val q = solution[i + 1]
+                if (!p.isAdjacentTo(q) || edgeWallBlocks(p, q, edgeWalls)) return false
+            }
+        }
+        return nextNumber > maxNumber
+    }
+
+    /** Searches directly for any valid route that deviates from [solution]. */
+    fun findAlternativeOrderedPath(
+        rows: Int, cols: Int,
+        numbers: Map<Int, Position>,
+        blocks: Set<Position>,
+        edgeWalls: Set<WallEdge>,
+        solution: List<Position>,
+        budget: Int = 2_000_000
+    ): AlternativePathResult {
+        if (!validateKnownSolution(rows, cols, numbers, blocks, edgeWalls, solution)) {
+            return AlternativePathResult(false, false, 0)
+        }
+        val total = rows * cols - blocks.size
+        val maxNumber = numbers.keys.maxOrNull() ?: return AlternativePathResult(false, false, 0)
+        val start = numbers[1] ?: return AlternativePathResult(false, false, 0)
+        val end = numbers[maxNumber] ?: return AlternativePathResult(false, false, 0)
+        val numberAt = numbers.entries.associate { it.value to it.key }
+        val solutionIndex = solution.withIndex().associate { it.value to it.index }
+        val visited = hashSetOf(start)
+        var budgetLeft = budget
+        var exhausted = false
+        var found = false
+
+        fun dfs(cur: Position, nextNumber: Int, covered: Int, deviated: Boolean) {
+            if (found || exhausted) return
+            if (budgetLeft <= 0) { exhausted = true; return }
+            budgetLeft--
+            if (covered == total) {
+                if (deviated && nextNumber > maxNumber && cur == end) found = true
+                return
+            }
+            val expected = if (!deviated) {
+                solutionIndex[cur]?.let { i -> solution.getOrNull(i + 1) }
+            } else null
+            val candidates = neighbours(cur, rows, cols)
+                .filter { it !in blocks && it !in visited && !edgeWallBlocks(cur, it, edgeWalls) }
+                .sortedBy { n ->
+                    neighbours(n, rows, cols).count {
+                        it !in blocks && it !in visited && !edgeWallBlocks(n, it, edgeWalls)
+                    }
+                }
+            for (nb in candidates) {
+                val num = numberAt[nb]
+                if (num != null && num != nextNumber) continue
+                visited.add(nb)
+                dfs(nb, if (num != null) nextNumber + 1 else nextNumber, covered + 1, deviated || nb != expected)
+                visited.remove(nb)
+                if (found || exhausted) return
+            }
+        }
+        dfs(start, 2, 1, false)
+        return AlternativePathResult(found, exhausted, 1)
+    }
+
+    private data class OneRouteResult(
+        val route: List<Position>?,
+        val budgetExhausted: Boolean
+    )
+
+    /** First valid ordered route, optionally avoiding one edge of the known path. */
+    private fun findOneRouteResult(
         rows: Int, cols: Int,
         numbers: Map<Int, Position>,
         blocks: Set<Position>,
         edgeWalls: Set<WallEdge>,
         bannedEdge: WallEdge?,
         budget: Int
-    ): List<Position>? {
+    ): OneRouteResult {
         val total = rows * cols - blocks.size
-        if (total <= 0) return null
-        val maxNumber = numbers.keys.maxOrNull() ?: return null
-        val start = numbers[1] ?: return null
-        if (start in blocks) return null
+        if (total <= 0) return OneRouteResult(null, false)
+        val maxNumber = numbers.keys.maxOrNull() ?: return OneRouteResult(null, false)
+        val start = numbers[1] ?: return OneRouteResult(null, false)
+        if (start in blocks) return OneRouteResult(null, false)
         val end = numbers[maxNumber]
-        if (end in blocks) return null
+        if (end in blocks) return OneRouteResult(null, false)
         val numberAt = HashMap<Position, Int>().apply { for ((n, p) in numbers) put(p, n) }
         var remaining = budget
+        var budgetExhausted = false
         val current = ArrayDeque<Position>().apply { addLast(start) }
         val visited = hashSetOf(start)
         var result: List<Position>? = null
 
         fun dfs(cur: Position, nextNumber: Int, covered: Int) {
-            if (result != null || remaining <= 0) return
+            if (result != null) return
+            if (remaining <= 0) { budgetExhausted = true; return }
             remaining--
             if (covered == total) {
                 if (nextNumber > maxNumber && cur == end) result = current.toList()
@@ -272,12 +366,12 @@ object LevelGenerator {
                 current.addLast(nb); visited.add(nb)
                 dfs(nb, if (isNum != null) nextNumber + 1 else nextNumber, covered + 1)
                 current.removeLast(); visited.remove(nb)
-                if (result != null || remaining <= 0) return
+                if (result != null || budgetExhausted) return
             }
         }
 
         dfs(start, 2, 1)
-        return result
+        return OneRouteResult(result, budgetExhausted)
     }
 
     /** Returns a valid alternative route distinct from [solution], or NULL when the
@@ -302,7 +396,7 @@ object LevelGenerator {
         var scanned = 0
         for (e in solEdges) {
             if (++scanned > probeLimit) break
-            val r = findOneRoute(rows, cols, numbers, blocks, walls, e, probeBudget)
+            val r = findOneRouteResult(rows, cols, numbers, blocks, walls, e, probeBudget).route
             if (r != null) return r
         }
         return null
@@ -332,14 +426,14 @@ object LevelGenerator {
      * non-solution edge — so uniqueness is reachable and termination is
      * guaranteed (not just "fewest routes").
      *
-     * @param numberDensity share of cells carrying a number
+     * @param numberCount exact number of checkpoints placed on the solution path
      * @param wallPieces    how many wall chains to attempt
      * @param maxChainLen   max edges per chain (1=straight stub, 3+ makes L/T)
      * @param allowBranch   when true, a chain may fork into a T from an endpoint
      */
     fun generateMazeWallLevel(
         rows: Int, cols: Int,
-        numberDensity: Float,
+        numberCount: Int,
         wallPieces: Int, maxChainLen: Int,
         allowBranch: Boolean,
         seed: Long,
@@ -347,17 +441,16 @@ object LevelGenerator {
     ): BrickLevel {
         require(rows >= 5 && cols >= 5)
         val total = rows * cols
+        require(numberCount in 4..total - 2)
         val random = Random(seed)
 
         // ── 1. Solution path FIRST (fast Hamiltonian, no walls yet) ──
         val solution = generateHamiltonianPath(rows, cols, seed)
         val solutionEdges = consecutiveEdges(solution)
 
-        // ── 2. Place wall CHAINS on edges the solution does NOT use. ──
-        // This guarantees the solution path stays fully intact → solvable by
-        // construction, NO expensive search-through-maze, NO shedding. The walls
-        // block alternative short-cuts and form connected chains (L/T) like Zip.
-        val walls = LinkedHashSet<WallEdge>()
+        // ── 2. WALL-FIRST graph: close every non-solution edge. ──
+        // The open graph initially is exactly the Hamiltonian path, so the known
+        // solution is valid and uniqueness is structurally guaranteed.
         val allEdges = buildList {
             for (r in 0 until rows) for (c in 0 until cols) {
                 val p = Position(r, c)
@@ -365,107 +458,44 @@ object LevelGenerator {
                 if (r + 1 < rows) add(WallEdge(p, Position(r + 1, c)))
             }
         }
-        val usable = allEdges.filter { e -> !solutionEdges.any { it.connects(e.a, e.b) } }.shuffled(random)
+        val nonSolutionEdges = allEdges.filter { edge ->
+            solutionEdges.none { it.connects(edge.a, edge.b) }
+        }.shuffled(random)
+        val walls = LinkedHashSet<WallEdge>().apply { addAll(nonSolutionEdges) }
 
-        var pieces = 0
-        var gi = 0
-        val totalEdges = allEdges.size
-        // Keep walls well below half of all edges so the board stays permissive.
-        val maxWalls = (totalEdges * 0.30f).toInt().coerceAtLeast(2)
-        while (pieces < wallPieces && gi < usable.size && walls.size < maxWalls) {
-            // Seed edge that is not yet walled and not a solution edge.
-            var seedEdge: WallEdge? = null
-            while (gi < usable.size) {
-                val e = usable[gi++]
-                if (e !in walls) { seedEdge = e; break }
-            }
-            seedEdge ?: break
-
-            // Grow a connected chain from this seed (straight / L / T).
-            val chain = ArrayDeque<WallEdge>().apply { addLast(seedEdge) }
-            val len = 1 + random.nextInt(maxChainLen)
-            var tip = if (random.nextBoolean()) seedEdge.b else seedEdge.a
-            var prev = if (tip == seedEdge.b) seedEdge.a else seedEdge.b
-
-            while (chain.size < len) {
-                val options = neighbours(tip, rows, cols)
-                    .filter { n ->
-                        n != prev &&
-                            !wallSetContains(walls, tip, n) &&
-                            !wallSetContains(chain.toSet(), tip, n) &&
-                            !wallSetContains(solutionEdges, tip, n)   // never block the solution
-                    }
-                if (options.isEmpty()) break
-                val next = options.random(random)
-                chain.addLast(WallEdge(tip, next))
-                prev = tip; tip = next
-            }
-
-            // Optional T-branch.
-            if (allowBranch && chain.size >= 2 && random.nextInt(3) == 0) {
-                val branchRoot = chain.random(random).let { if (random.nextBoolean()) it.a else it.b }
-                val branchOpts = neighbours(branchRoot, rows, cols).filter { n ->
-                    !wallSetContains(walls, branchRoot, n) &&
-                        !wallSetContains(chain.toSet(), branchRoot, n) &&
-                        !wallSetContains(solutionEdges, branchRoot, n)
-                }
-                if (branchOpts.isNotEmpty()) {
-                    val bNext = branchOpts.random(random)
-                    chain.addLast(WallEdge(branchRoot, bNext))
-                }
-            }
-
-            // Accept the chain if it keeps the board connected. Degree safety is
-            // automatically satisfied for every cell ON the solution path (which
-            // is intact), and candidate chains avoid solution edges, so we only
-            // need to ensure we don't wall off a cell entirely (parity/connectivity).
-            val before = walls.size
-            val added = walls.addAll(chain) && walls.size > before
-            if (added) {
-                if (!connectedAllCells(rows, cols, walls)) walls.removeAll(chain)
-                else pieces++
-            }
-        }
-
-        // ── 3. Numbers on the (intact) solution path — solvable by construction ──
-        val numberCount = (total * numberDensity).toInt().coerceIn(4, total - 2)
+        // ── 3. Numbers on the intact solution path. ──
         val numbers = placeNumbers(solution, numberCount, seed, minSeg, maxSeg)
 
-        // ── 4. Converge to a UNIQUE solution — wall the deviation edges of any ──
-        // alternative route until exactly one valid route remains (true
-        // uniqueness, not just "fewest routes"). This is guaranteed to terminate:
-        //   • The solution is a cover-all Hamiltonian path through EVERY cell, so
-        //     every cell keeps its two solution edges open; walling any
-        //     non-solution edge can therefore NEVER disconnect the board.
-        //   • A distinct valid alternative (cover-all + numbers in order + ends on
-        //     the last number) must differ from the solution on at least one edge,
-        //     and that edge is a non-solution edge we are free to wall.
-        // Hence each iteration strictly lowers the route count and reaches exactly
-        // ONE route. (Kill the deviation edge nearest the board centre first —
-        // central walls prune the most alternatives with the fewest walls.)
-        val centreR = rows / 2f
-        val centreC = cols / 2f
-        val convEdgeCap = (totalEdges * 0.65f).toInt().coerceAtLeast(4)   // solutions survive all non-solution walls
-        var convIter = 0
-        while (convIter < 300 && walls.size < convEdgeCap) {
-            convIter++
-            // Robust uniqueness probe: a distinct Hamiltonian route must omit at
-            // least one solution edge, so search for any route that survives with
-            // each solution edge sealed shut. Null => truly unique.
-            val alt = findAlternativeRoute(rows, cols, numbers, emptySet(), walls, solution) ?: break
-            val candidates = consecutiveEdges(alt).filter { e ->
-                !solutionEdges.any { it.connects(e.a, e.b) } && !wallSetContains(walls, e.a, e.b)
+        // Selectively remove walls. wallPieces is retained as the tier's target
+        // number of extra edges to open. Every opening is tested against the real
+        // numbered puzzle; failed or budget-starved probes remain closed.
+        var opened = 0
+        for (edge in nonSolutionEdges) {
+            if (opened >= wallPieces) break
+            walls.remove(edge)
+            val candidate = findAlternativeOrderedPath(
+                rows, cols, numbers, emptySet(), walls, solution, budget = 250_000
+            )
+            if (!candidate.alternativeFound && !candidate.budgetExhausted) {
+                opened++
+            } else {
+                walls.add(edge)
             }
-            if (candidates.isEmpty()) break   // cannot happen for a genuine alternative (see KDoc)
-            val picked = candidates.minByOrNull { w ->
-                val mr = (w.a.row + w.b.row) / 2f
-                val mc = (w.a.col + w.b.col) / 2f
-                (mr - centreR) * (mr - centreR) + (mc - centreC) * (mc - centreC)
-            }!!
-            walls.add(picked)
         }
 
-        return BrickLevel(solution, emptySet(), numbers, walls)
+        // Final conservative uniqueness check with actual checkpoints. If an opened
+        // edge made a numbered alternative possible, restore that edge as a wall.
+        val acceptedWalls = LinkedHashSet(walls)
+        val openedEdges = nonSolutionEdges.filter { it !in acceptedWalls }
+        for (edge in openedEdges) {
+            acceptedWalls.remove(edge)
+            val result = findAlternativeOrderedPath(
+                rows, cols, numbers, emptySet(), acceptedWalls, solution, budget = 500_000
+            )
+            if (result.alternativeFound || result.budgetExhausted) acceptedWalls.add(edge)
+        }
+
+        return BrickLevel(solution, emptySet(), numbers, acceptedWalls)
     }
 
     /** All cells reachable through non-walled edges? (O(cells) BFS). */

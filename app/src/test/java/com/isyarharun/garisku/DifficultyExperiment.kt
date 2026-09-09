@@ -45,10 +45,10 @@ class DifficultyExperiment {
         if (System.getenv("GARISKU_EXP") != "1") return
         val probeLevels = listOf(1, 10, 15, 25, 26, 35, 50)
         val sb = StringBuilder("=== Phase A: production uniqueness-gate convergence health ===\n")
-        sb.append("Lvl | tier | grid | cfgDen | cand | unique | nonUniq | reject | min-walls | avg-walls\n")
+        sb.append("Lvl | tier | grid | cntRng | cand | unique | nonUniq | reject | min-walls | avg-walls\n")
         for (level in probeLevels) {
             val (rows, cols) = LevelFactory.gridSizeFor(level)
-            val cfg = LevelFactory.challengeConfigFor(level, rows, cols)
+            val countRange = "8-10"
             val n = LevelFactory.candidatesFor(level)
             var unique = 0; var nonUniq = 0; var rej = 0
             var wallsSum = 0L; var minWalls = Int.MAX_VALUE; var acc = 0
@@ -64,8 +64,8 @@ class DifficultyExperiment {
                 }
             }
             sb.append(
-                ("L%2d | %-9s | %dx%d | %.2f | %3d | %4d | %4d | %4d | %6s | %6.1f\n").format(
-                    level, LevelFactory.tierFor(level).name, rows, cols, cfg.numberDensity, n,
+                ("L%2d | %-9s | %dx%d | %5s | %3d | %4d | %4d | %4d | %6s | %6.1f\n").format(
+                    level, LevelFactory.tierFor(level).name, rows, cols, countRange, n,
                     unique, nonUniq, rej,
                     if (minWalls == Int.MAX_VALUE) "-" else minWalls.toString(),
                     if (acc > 0) wallsSum.toFloat() / acc else 0f
@@ -76,6 +76,32 @@ class DifficultyExperiment {
     }
 
     // ── Phase B: achieved difficulty band vs target anchors ──────────────────
+
+    @Test
+    fun phaseGridCountSample() {
+        if (System.getenv("GARISKU_EXP") != "1") return
+        val out = java.io.File("build/reports/exp_grid_count_sample.txt")
+        out.parentFile?.mkdirs()
+        out.writeText("level|grid|count|walls|buildMs|routeCount|routeMs|score\n")
+        for (level in listOf(1, 10, 25, 26, 35, 50)) {
+            val seed = LevelGenerator.seedFor(GameMode.CHALLENGE, level)
+            val t0 = System.currentTimeMillis()
+            val gs = LevelFactory.buildWithSeed(GameMode.CHALLENGE, level, seed)
+            val buildMs = System.currentTimeMillis() - t0
+            val t1 = System.currentTimeMillis()
+            val known = gs.solutionPath ?: error("missing solution path")
+            val directValid = LevelGenerator.validateKnownSolution(
+                gs.rows, gs.cols, gs.numberPositions, gs.blocks, gs.edgeWalls, known
+            )
+            val alternative = LevelGenerator.findAlternativeOrderedPath(
+                gs.rows, gs.cols, gs.numberPositions, gs.blocks, gs.edgeWalls, known
+            )
+            val routeMs = System.currentTimeMillis() - t1
+            val score = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions).total
+            out.appendText("$level|${gs.rows}x${gs.cols}|${gs.totalNumbers}|${gs.edgeWalls.size}|$buildMs|valid=$directValid|alt=${alternative.alternativeFound}|budget=${alternative.budgetExhausted}|$routeMs|$score\n")
+            println("grid-sample: level=$level grid=${gs.rows}x${gs.cols} count=${gs.totalNumbers} valid=$directValid alternative=${alternative.alternativeFound} budget=${alternative.budgetExhausted} routeMs=$routeMs score=$score")
+        }
+    }
 
     @Test
     fun phaseB_difficultyBand() {

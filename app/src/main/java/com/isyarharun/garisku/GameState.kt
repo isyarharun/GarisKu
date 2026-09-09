@@ -51,6 +51,8 @@ class GameState(
     val blocks: Set<Position> = emptySet(),
     /** Zip-style edge walls that block crossing between two adjacent cells. */
     val edgeWalls: Set<WallEdge> = emptySet(),
+    /** Generator-only known Hamiltonian solution for verification/export diagnostics. */
+    val solutionPath: List<Position>? = null,
     /** Cumulative elapsed seconds carried over from previous attempts. */
     initialElapsedSeconds: Int = 0
 ) {
