@@ -44,9 +44,10 @@ object DifficultyScorer {
         cols: Int,
         blocks: Set<Position>,
         edgeWalls: Set<WallEdge>,
-        numbers: Map<Int, Position>
+        numbers: Map<Int, Position>,
+        knownRoute: List<Position>? = null
     ): Score {
-        val a = RouteAnalyzer.analyze(rows, cols, numbers, blocks, edgeWalls)
+        val a = RouteAnalyzer.analyze(rows, cols, numbers, blocks, edgeWalls, knownRoute)
         val nearF = ln(1f + minOf(a.nearSolutionFull, 256).toFloat()) / ln(257f)
         val nearP = ln(1f + minOf(a.nearSolutionPrefix, 256).toFloat()) / ln(257f)
         val dec = 1f - a.forcedMoveRatio

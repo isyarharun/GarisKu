@@ -13,10 +13,10 @@ class GridAndCountInvariantTest {
         val seeds = (0L until 40L).map { 7919L * it + 17L }
         val counts8 = seeds.map { LevelFactory.challengeNumberCount(8, 8, it) }
         val counts10 = seeds.map { LevelFactory.challengeNumberCount(10, 10, it) }
-        check(counts8.all { it in 8..10 })
-        check(counts10.all { it in 8..10 })
-        check(counts8.any { it == 8 } && counts8.any { it == 10 })
-        check(counts10.any { it == 8 } && counts10.any { it == 10 })
+        check(counts8.all { it in 10..11 })
+        check(counts10.all { it in 7..8 })
+        check(counts8.any { it == 10 } && counts8.any { it == 11 })
+        check(counts10.any { it == 7 } && counts10.any { it == 8 })
         check(LevelFactory.challengeNumberCount(8, 8, 123L) ==
             LevelFactory.challengeNumberCount(8, 8, 123L))
     }
@@ -58,7 +58,7 @@ class GridAndCountInvariantTest {
     fun challengeBuildUsesRequestedGridAndCountRange() {
         val l5 = LevelFactory.buildWithSeed(GameMode.CHALLENGE, 5, LevelGenerator.seedFor(GameMode.CHALLENGE, 5))
         val l30 = LevelFactory.buildWithSeed(GameMode.CHALLENGE, 30, LevelGenerator.seedFor(GameMode.CHALLENGE, 30))
-        check(l5.rows == 8 && l5.cols == 8 && l5.totalNumbers in 8..10)
-        check(l30.rows == 10 && l30.cols == 10 && l30.totalNumbers in 8..10)
+        check(l5.rows == 8 && l5.cols == 8 && l5.totalNumbers in 10..11)
+        check(l30.rows == 10 && l30.cols == 10 && l30.totalNumbers in 7..8)
     }
 }

@@ -25,6 +25,11 @@ data class WallEdge(val a: Position, val b: Position) {
     init { require(a.isAdjacentTo(b)) }
     fun connects(x: Position, y: Position): Boolean =
         (a == x && b == y) || (a == y && b == x)
+
+    /** True when this edge shares exactly one endpoint cell with [other]
+     *  (adjacent grid edges — used to grow wall chains). */
+    fun touches(other: WallEdge): Boolean =
+        a == other.a || a == other.b || b == other.a || b == other.b
 }
 
 data class Cell(

@@ -4,11 +4,11 @@ import org.junit.Test
 import java.io.File
 
 /**
- * One-shot exporter with edge-walls + uniqueness guarantee.
- * Challenge candidates come from LevelFactory.generateMazeWallLevel (wall
- * chains on non-solution edges + convergence to a single valid route); only
- * levels with exactly one valid route are exported. Prints the difficulty
- * acceptance table.
+ * One-shot exporter with edge-walls + soft-uniqueness selection.
+ * Challenge candidates come from LevelGenerator.generateMazeWallLevel (sparse
+ * wall chains on non-solution edges + soft convergence); selection keeps the
+ * candidate with the FEWEST valid routes (1 = unique) closest to the difficulty
+ * target. Prints the difficulty acceptance table.
  * Run with:
  *   ./gradlew :app:testDebugUnitTest --tests "*LevelExporter*exportAllLevels*"
  */
@@ -44,8 +44,8 @@ class LevelExporter {
     fun exportAllLevels() {
         val assets = File("src/main/assets").apply { mkdirs() }
         val table = StringBuilder()
-        table.appendLine("=== Challenge 50 levels — unique-solution; grids 8x8 (L1-25) / 10x10 (L26-50); count 8..10 ===")
-        table.appendLine("Lvl | Grid | Nums | Dens | Gap | Bricks | Uniq | Br | Frc | nearF | nearP | DevM | Score | Tgt | Rej")
+        table.appendLine("=== Challenge 50 levels — fewest-routes/switches selection; 8x8 (L1-25, 10-11 nums) / 10x10 (L26-50, 7-8 nums) ===")
+        table.appendLine("Lvl | Grid | Nums | Walls | Dens | Gap | Rt | Sw | Bricks | Br | Frc | nearF | nearP | DevM | Score | Tgt | Rej   (Rt 0 = search budget exhausted / very open)")
 
         for (mode in GameMode.entries) {
             val sb = StringBuilder("{")
@@ -59,48 +59,70 @@ class LevelExporter {
                 var chosenScore = 0
                 if (mode == GameMode.CHALLENGE) {
                     val target = LevelFactory.challengeTargetFor(level)
-                    var best: Triple<Int, GameState, Int>? = null
+                    var best: Triple<Int, GameState, Int>? = null   // attempt, state, |score-target|
+                    var bestRoutes = Int.MAX_VALUE
+                    var bestSwitches = Int.MAX_VALUE
+                    var chosenScore = 0
                     var rejections = 0
                     val nCandidates = LevelFactory.candidatesFor(level)
                     for (attempt in 0 until nCandidates) {
                         val gs = LevelFactory.buildWithSeedOrNull(mode, level, seedFor(mode, level, attempt))
-                        if (gs == null) { rejections++; continue }   // no path through maze
+                        if (gs == null) { rejections++; continue }
                         val known = gs.solutionPath ?: run { rejections++; continue }
                         if (!LevelGenerator.validateKnownSolution(
                                 gs.rows, gs.cols, gs.numberPositions, gs.blocks, gs.edgeWalls, known
                             )) {
                             rejections++; println("L$level att=$attempt: known solution invalid"); continue
                         }
-                        val alternative = LevelGenerator.findAlternativeOrderedPath(
-                            gs.rows, gs.cols, gs.numberPositions, gs.blocks, gs.edgeWalls, known
+                        val routes = LevelGenerator.countOrderedPaths(
+                            gs.rows, gs.cols, gs.numberPositions, gs.blocks,
+                            stopAfter = LevelFactory.ROUTE_COUNT_CAP, edgeWalls = gs.edgeWalls,
+                            budget = 400_000
                         )
-                        if (alternative.alternativeFound || alternative.budgetExhausted) {
-                            rejections++
-                            println("L$level att=$attempt: alternative=${alternative.alternativeFound}, budget=${alternative.budgetExhausted}")
-                            continue
-                        }
-                        val sc = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions)
-                        // This is a UNIQUE solvable candidate — pick the one closest to target.
+                        val routesBucket = if (routes == 0) LevelFactory.ROUTE_COUNT_CAP + 1 else routes
+                        val switches = LevelGenerator.countSwitches(
+                            gs.rows, gs.cols, gs.numberPositions, gs.edgeWalls, known,
+                            cap = LevelFactory.SWITCH_CAP
+                        )
+                        val sc = DifficultyScorer.score(gs.rows, gs.cols, gs.blocks, gs.edgeWalls, gs.numberPositions, known)
                         val dist = kotlin.math.abs(sc.total - target)
-                        if (best == null || dist < best.third) {
+                        val better = routesBucket < bestRoutes ||
+                            (routesBucket == bestRoutes && switches < bestSwitches) ||
+                            (routesBucket == bestRoutes && switches == bestSwitches && (best == null || dist < best.third))
+                        if (better) {
                             best = Triple(attempt, gs, dist)
+                            bestRoutes = routesBucket
+                            bestSwitches = switches
                             chosenScore = sc.total
                         }
                     }
-                    chosen = best ?: error("Level $level: no UNIQUE solvable candidate in $nCandidates attempts")
+                    chosen = Triple(
+                        best?.first ?: -1,
+                        best?.second ?: error("Level $level: no solvable challenge candidate in $nCandidates attempts"),
+                        best?.third ?: 0
+                    )
                     // Record for the boss-zone rolling window (keep last 5).
                     recentScores.addLast(chosenScore)
                     while (recentScores.size > 5) recentScores.removeFirst()
 
                     val gs = chosen.second
+                    // Honest re-count for the table (bigger budget).
+                    val routes = LevelGenerator.countOrderedPaths(
+                        gs.rows, gs.cols, gs.numberPositions, gs.blocks,
+                        stopAfter = LevelFactory.ROUTE_COUNT_CAP, edgeWalls = gs.edgeWalls
+                    )
+                    val switches = LevelGenerator.countSwitches(
+                        gs.rows, gs.cols, gs.numberPositions, gs.edgeWalls, gs.solutionPath!!,
+                        cap = LevelFactory.SWITCH_CAP
+                    )
                     val open = allOpen(gs)
                     val density = gs.totalNumbers.toFloat() / open.size
-                    val ana = RouteAnalyzer.analyze(gs.rows, gs.cols, gs.numberPositions, gs.blocks, gs.edgeWalls)
+                    val ana = RouteAnalyzer.analyze(gs.rows, gs.cols, gs.numberPositions, gs.blocks, gs.edgeWalls, gs.solutionPath)
                     val (gm, _) = gapStats(ana.solutionRoute, gs.numberPositions)
                     table.appendLine(
-                        ("%3d | %dx%d | %4d | %.2f | %4.2f | %6d | %4d | %.2f | %5.1f | %5d | %5d | %4.1f | %5d | %3d | %3d").format(
-                            level, gs.rows, gs.cols, gs.totalNumbers, density,
-                            gm, gs.blocks.size, 1,
+                        ("%3d | %dx%d | %4d | %5d | %.2f | %4.2f | %3d | %2d | %6d | %.2f | %5.1f | %5d | %5d | %4.1f | %5d | %3d | %3d").format(
+                            level, gs.rows, gs.cols, gs.totalNumbers, gs.edgeWalls.size, density,
+                            gm, routes, switches, gs.blocks.size,
                             ana.avgBranching, ana.forcedMoveRatio,
                             ana.nearSolutionFull, ana.nearSolutionPrefix,
                             ana.meanDeviationDepth, chosenScore, target, rejections
@@ -136,34 +158,35 @@ class LevelExporter {
     }
 
     /**
-     * Verifies every exported challenge level has EXACTLY ONE valid route
-     * and satisfies the win-condition invariants.
+     * Verifies every exported challenge level is solvable and LOCALLY UNIQUE
+     * (no short alternative route = no switches) and satisfies the
+     * win-condition invariants. Route counting is informational only: very
+     * open boards can exhaust any sane search budget even though they are
+     * solvable and switch-free (soft uniqueness — see generateMazeWallLevel).
      */
     @Test
-    fun verifyChallengeLevelsUniqueAndSolvable() {
+    fun verifyChallengeLevelsSolvable() {
         for (level in 1..LevelFactory.LEVEL_COUNT) {
             val attempt = readSeedAttempt(GameMode.CHALLENGE, level)
                 ?: error("Level $level: missing seed_attempt")
-            val known = LevelFactory.buildWithSeed(
-                GameMode.CHALLENGE, level, seedFor(GameMode.CHALLENGE, level, attempt)
-            ).solutionPath ?: error("Level $level: missing generated solution path")
             val rebuilt = LevelFactory.buildWithSeed(
                 GameMode.CHALLENGE, level, seedFor(GameMode.CHALLENGE, level, attempt)
             )
+            val known = rebuilt.solutionPath ?: error("Level $level: missing generated solution path")
             check(LevelGenerator.validateKnownSolution(
                 rebuilt.rows, rebuilt.cols, rebuilt.numberPositions, rebuilt.blocks, rebuilt.edgeWalls, known
             )) { "Level $level: generated solution failed direct validation" }
-            val alternative = LevelGenerator.findAlternativeOrderedPath(
-                rebuilt.rows, rebuilt.cols, rebuilt.numberPositions, rebuilt.blocks, rebuilt.edgeWalls, known
+            val switches = LevelGenerator.countSwitches(
+                rebuilt.rows, rebuilt.cols, rebuilt.numberPositions, rebuilt.edgeWalls, known,
+                cap = LevelFactory.SWITCH_CAP
             )
-            check(!alternative.alternativeFound && !alternative.budgetExhausted) {
-                "Level $level: uniqueness verification failed: $alternative"
-            }
+            check(switches == 0) { "Level $level: $switches local switches remain (expected locally unique)" }
             check(if (level <= 25) rebuilt.rows == 8 && rebuilt.cols == 8 else rebuilt.rows == 10 && rebuilt.cols == 10) {
                 "Level $level: unexpected grid ${rebuilt.rows}x${rebuilt.cols}"
             }
-            check(rebuilt.numberPositions.size in 8..10) {
-                "Level $level: expected 8..10 numbers, got ${rebuilt.numberPositions.size}"
+            val expectedNumbers = if (level <= 25) 10..11 else 7..8
+            check(rebuilt.numberPositions.size in expectedNumbers) {
+                "Level $level: expected $expectedNumbers numbers, got ${rebuilt.numberPositions.size}"
             }
             checkNotNull(rebuilt.numberPositions[1]) { "Level $level: missing number 1" }
             checkNotNull(rebuilt.numberPositions[rebuilt.totalNumbers]) { "Level $level: missing final number" }

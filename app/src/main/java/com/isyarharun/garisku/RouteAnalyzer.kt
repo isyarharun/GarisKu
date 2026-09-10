@@ -55,7 +55,8 @@ object RouteAnalyzer {
         rows: Int, cols: Int,
         numbers: Map<Int, Position>,
         blocks: Set<Position>,
-        edgeWalls: Set<WallEdge> = emptySet()
+        edgeWalls: Set<WallEdge> = emptySet(),
+        knownRoute: List<Position>? = null
     ): Analysis {
         val total = rows * cols - blocks.size
         val maxNumber = numbers.keys.maxOrNull() ?: return empty()
@@ -69,7 +70,13 @@ object RouteAnalyzer {
             !edgeWalls.any { it.connects(a, b) }
 
         // ── 1. Reconstruct ONE valid solution (deterministic DFS order) ──
-        val solution = findRoute(rows, cols, numberAt, blocks, total, maxNumber, start, end, edgeWalls)
+        // On sparse (image-style) boards a blind route search is intractable, so
+        // callers pass the generator's known solution; it is re-checked against
+        // the walls before use.
+        val solution = knownRoute?.takeIf { route ->
+            route.size == total && route.first() == start && route.last() == end &&
+                route.zipWithNext().none { (p, q) -> edgeWalls.any { w -> w.connects(p, q) } }
+        } ?: findRoute(rows, cols, numberAt, blocks, total, maxNumber, start, end, edgeWalls)
             ?: return empty(numbers.size)
 
         // ── 2. Solution walk: branching + forced moves + wrong turns ──
